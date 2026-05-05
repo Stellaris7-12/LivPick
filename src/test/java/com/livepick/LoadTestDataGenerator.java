@@ -69,20 +69,20 @@ public class LoadTestDataGenerator {
         for (int i = 0; i < seeds.size(); i += DEFAULT_BATCH_SIZE) {
             List<UserSeed> batch = seeds.subList(i, Math.min(i + DEFAULT_BATCH_SIZE, seeds.size()));
             jdbcTemplate.batchUpdate(sql, batch, batch.size(), (ps, seed) -> {
-                ps.setString(1, seed.phone());
-                ps.setString(2, seed.nickName());
+                ps.setString(1, seed.getPhone());
+                ps.setString(2, seed.getNickName());
             });
         }
         System.out.printf("用户生成完成，目标数量=%d，手机号范围=%s ~ %s%n",
                 options.count,
-                seeds.get(0).phone(),
-                seeds.get(seeds.size() - 1).phone());
+                seeds.get(0).getPhone(),
+                seeds.get(seeds.size() - 1).getPhone());
     }
 
     private void generateTokens(JdbcTemplate jdbcTemplate, StringRedisTemplate stringRedisTemplate, GeneratorOptions options)
             throws IOException {
         List<String> phones = buildSeeds(options).stream()
-                .map(UserSeed::phone)
+                .map(UserSeed::getPhone)
                 .collect(Collectors.toList());
         List<Map<String, Object>> users = queryUsersByPhones(jdbcTemplate, phones);
         if (users.size() != phones.size()) {
@@ -144,7 +144,22 @@ public class LoadTestDataGenerator {
         return seeds;
     }
 
-    private record UserSeed(String phone, String nickName) {
+    private static final class UserSeed {
+        private final String phone;
+        private final String nickName;
+
+        private UserSeed(String phone, String nickName) {
+            this.phone = phone;
+            this.nickName = nickName;
+        }
+
+        private String getPhone() {
+            return phone;
+        }
+
+        private String getNickName() {
+            return nickName;
+        }
     }
 
     private static final class GeneratorOptions {

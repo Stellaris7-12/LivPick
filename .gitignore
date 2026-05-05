@@ -1,0 +1,42 @@
+# Compiled output
+/target/
+/build/
+
+# IDE files
+.idea/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.sts4-cache
+.apt_generated
+.factorypath
+.springBeans
+
+# VS Code
+.vscode/
+
+# NetBeans
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+# Logs & temp
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local config (optional)
+src/main/resources/application-local.yaml
+HELP.md
+
+# 其他
+CODE_REVIEW_REPORT.md
+核心流程梳理.md
+简历核心内容（专业技能+项目）.txt
+hmdp面试.pdf

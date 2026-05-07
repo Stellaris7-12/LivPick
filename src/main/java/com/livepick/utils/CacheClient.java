@@ -22,7 +22,7 @@ import static com.livepick.utils.RedisConstants.LOCK_SHOP_KEY;
 public class CacheClient {
 
     private final StringRedisTemplate stringRedisTemplate;
-
+    // 创建固定大小线程池用于异步缓存重建
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
 
     public CacheClient(StringRedisTemplate stringRedisTemplate) {
@@ -42,6 +42,7 @@ public class CacheClient {
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
     }
 
+    // 使用缓存空值解决缓存穿透问题
     public <R,ID> R queryWithPassThrough(
             String keyPrefix, ID id, Class<R> type, Function<ID, R> dbFallback, Long time, TimeUnit unit){
         String key = keyPrefix + id;
@@ -72,6 +73,7 @@ public class CacheClient {
         return r;
     }
 
+    // 使用逻辑过期解决缓存击穿问题
     public <R, ID> R queryWithLogicalExpire(
             String keyPrefix, ID id, Class<R> type, Function<ID, R> dbFallback, Long time, TimeUnit unit) {
         String key = keyPrefix + id;
@@ -117,6 +119,7 @@ public class CacheClient {
         return r;
     }
 
+    // 使用互斥锁解决缓存击穿问题（等待延迟、线程堆积风险）
     public <R, ID> R queryWithMutex(
             String keyPrefix, ID id, Class<R> type, Function<ID, R> dbFallback, Long time, TimeUnit unit) {
         String key = keyPrefix + id;

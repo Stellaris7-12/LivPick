@@ -1,20 +1,29 @@
 package com.livepick.config;
 
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.redisson.Redisson;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.util.StringUtils;
+
+import javax.annotation.Resource;
 
 @Configuration
 public class RedissonConfig {
 
+    @Resource
+    private RedisProperties redisProperties;
+
     @Bean
     public RedissonClient redissonClient(){
-        // 配置
         Config config = new Config();
-        config.useSingleServer().setAddress("redis://192.168.11.130:6379").setPassword("redis1234");
-        // 创建RedissonClient对象
+        String address = String.format("redis://%s:%s", redisProperties.getHost(), redisProperties.getPort());
+        config.useSingleServer().setAddress(address);
+        if (StringUtils.hasText(redisProperties.getPassword())) {
+            config.useSingleServer().setPassword(redisProperties.getPassword());
+        }
         return Redisson.create(config);
     }
 }

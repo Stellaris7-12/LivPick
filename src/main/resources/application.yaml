@@ -19,10 +19,38 @@ spring:
         max-idle: 10
         min-idle: 1
         time-between-eviction-runs: 10s
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:livpick-consumer-group}
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
   jackson:
     default-property-inclusion: non_null
 mybatis-plus:
-  type-aliases-package: com.hmdp.entity
+  type-aliases-package: com.livepick.entity
+livpick:
+  kafka:
+    seckill-order-topic: seckill-order-create
+    cache-delete-retry-topic: cache-shop-delete-retry
+    partitions: 1
+    replicas: 1
+  order:
+    timeout-minutes: 15
+    timeout-scan-interval-ms: 60000
+    delay-queue-name: order:timeout:queue
+  cache:
+    delete-retry-max-attempts: 3
+  bloom:
+    shop-filter-name: bf:shop:id
+    expected-insertions: 100000
+    false-probability: 0.03
 logging:
   level:
     com.livepick: debug

@@ -2,6 +2,7 @@ package com.livepick.service;
 
 import com.livepick.dto.Result;
 import com.livepick.entity.VoucherOrder;
+import com.livepick.mq.message.SeckillOrderMessage;
 import com.baomidou.mybatisplus.extension.service.IService;
 
 /**
@@ -15,4 +16,12 @@ import com.baomidou.mybatisplus.extension.service.IService;
 public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     Result seckillVoucher(Long voucherId);
+
+    void createVoucherOrder(SeckillOrderMessage message);
+
+    boolean closeTimeoutOrder(Long orderId);
+
+    boolean payOrder(Long orderId);
+
+    void scanAndCloseTimeoutOrders();
 }

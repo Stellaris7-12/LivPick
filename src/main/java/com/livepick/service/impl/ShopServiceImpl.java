@@ -7,6 +7,9 @@ import com.livepick.dto.Result;
 import com.livepick.entity.Shop;
 import com.livepick.mapper.ShopMapper;
 import com.livepick.service.IShopService;
+import com.livepick.service.ShopBloomFilterService;
+import com.livepick.mq.message.CacheDeleteRetryMessage;
+import com.livepick.mq.producer.LivPickKafkaProducer;
 import com.livepick.utils.CacheClient;
 import com.livepick.utils.SystemConstants;
 import org.springframework.data.geo.Distance;
@@ -41,20 +44,18 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Resource
     private CacheClient cacheClient;
+    @Resource
+    private ShopBloomFilterService shopBloomFilterService;
+    @Resource
+    private LivPickKafkaProducer livPickKafkaProducer;
 
     @Override
     public Result queryById(Long id) {
-        // 解决缓存穿透
         Shop shop = cacheClient
-                .queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
-
-        // 互斥锁解决缓存击穿
-        // Shop shop = cacheClient
-        //         .queryWithMutex(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
-
-        // 逻辑过期解决缓存击穿
-        // Shop shop = cacheClient
-        //         .queryWithLogicalExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, 20L, TimeUnit.SECONDS);
+                .queryWithBloomPassThrough(
+                        CACHE_SHOP_KEY, id, shopBloomFilterService::mightContain, Shop.class,
+                        this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES
+                );
 
         if (shop == null) {
             return Result.fail("店铺不存在！");
@@ -72,8 +73,21 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         // 1.更新数据库
         updateById(shop);
-        // 2.删除缓存
-        stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+        String cacheKey = CACHE_SHOP_KEY + id;
+        try {
+            cacheClient.delete(cacheKey);
+        } catch (Exception e) {
+            CacheDeleteRetryMessage message = new CacheDeleteRetryMessage();
+            message.setCacheKey(cacheKey);
+            message.setBizType("SHOP");
+            message.setBizId(id);
+            message.setRetryCount(0);
+            try {
+                livPickKafkaProducer.sendCacheDeleteRetry(message);
+            } catch (Exception producerException) {
+                throw new RuntimeException("send cache delete retry message failed", producerException);
+            }
+        }
         return Result.ok();
     }
 

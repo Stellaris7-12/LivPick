@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import static com.livepick.utils.RedisConstants.CACHE_NULL_TTL;
 import static com.livepick.utils.RedisConstants.LOCK_SHOP_KEY;
@@ -31,6 +32,10 @@ public class CacheClient {
 
     public void set(String key, Object value, Long time, TimeUnit unit) {
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+    }
+
+    public void delete(String key) {
+        stringRedisTemplate.delete(key);
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
@@ -71,6 +76,15 @@ public class CacheClient {
         // 6.存在，写入redis
         this.set(key, r, time, unit);
         return r;
+    }
+
+    public <R, ID> R queryWithBloomPassThrough(
+            String keyPrefix, ID id, Predicate<ID> bloomFilterPredicate, Class<R> type,
+            Function<ID, R> dbFallback, Long time, TimeUnit unit) {
+        if (!bloomFilterPredicate.test(id)) {
+            return null;
+        }
+        return queryWithPassThrough(keyPrefix, id, type, dbFallback, time, unit);
     }
 
     // 使用逻辑过期解决缓存击穿问题

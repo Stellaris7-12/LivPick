@@ -36,8 +36,4 @@ src/main/resources/application-local.yaml
 HELP.md
 
 # 其他
-CODE_REVIEW_REPORT.md
-核心流程梳理.md
-简历核心内容（专业技能+项目）.txt
-hmdp面试.pdf
-话术.txt
+# interview/

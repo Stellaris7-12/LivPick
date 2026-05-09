@@ -18,7 +18,14 @@ public class SeckillOrderConsumer {
     @KafkaListener(topics = "${livpick.kafka.seckill-order-topic}", groupId = "${spring.kafka.consumer.group-id}")
     public void consume(String messageJson) {
         SeckillOrderMessage message = JSONUtil.toBean(messageJson, SeckillOrderMessage.class);
-        log.debug("consume seckill order message, orderId={}", message.getOrderId());
-        voucherOrderService.createVoucherOrder(message);
+        try {
+            log.debug("consume seckill order message, orderId={}, userId={}, voucherId={}",
+                    message.getOrderId(), message.getUserId(), message.getVoucherId());
+            voucherOrderService.createVoucherOrder(message);
+        } catch (Exception e) {
+            log.error("consume seckill order message failed, orderId={}, userId={}, voucherId={}, failureStage=createVoucherOrder",
+                    message.getOrderId(), message.getUserId(), message.getVoucherId(), e);
+            throw e;
+        }
     }
 }

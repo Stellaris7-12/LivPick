@@ -19,10 +19,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
@@ -95,14 +97,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         RLock redisLock = redissonClient.getLock(LOCK_ORDER_KEY + userId);
         boolean isLock = redisLock.tryLock();
         if (!isLock) {
-            log.warn("duplicate create order request, userId={}, voucherId={}", userId, voucherId);
+            log.warn("skip duplicated consume request, orderId={}, userId={}, voucherId={}, failureStage=acquireLock",
+                    message.getOrderId(), userId, voucherId);
             return;
         }
 
         try {
             int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
             if (count > 0) {
-                log.warn("user already ordered voucher, userId={}, voucherId={}", userId, voucherId);
+                log.info("skip duplicated order consume, orderId={}, userId={}, voucherId={}, failureStage=duplicateQuery",
+                        message.getOrderId(), userId, voucherId);
                 return;
             }
 
@@ -113,8 +117,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     .update();
             if (!stockUpdated) {
                 restoreRedisReservation(voucherId, userId);
-                log.error("database stock insufficient, voucherId={}", voucherId);
-                throw new IllegalStateException("database stock insufficient");
+                log.warn("db stock insufficient after kafka consume, orderId={}, userId={}, voucherId={}, failureStage=deductDbStock",
+                        message.getOrderId(), userId, voucherId);
+                return;
             }
 
             VoucherOrder voucherOrder = new VoucherOrder();
@@ -125,10 +130,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             voucherOrder.setStatus(OrderStatusConstants.UNPAID);
             voucherOrder.setCreateTime(message.getCreateTime() == null ? LocalDateTime.now() : message.getCreateTime());
             voucherOrder.setUpdateTime(LocalDateTime.now());
-            boolean saved = save(voucherOrder);
-            if (!saved) {
-                restoreRedisReservation(voucherId, userId);
-                throw new IllegalStateException("save voucher order failed");
+            try {
+                boolean saved = save(voucherOrder);
+                if (!saved) {
+                    restoreRedisReservation(voucherId, userId);
+                    throw new IllegalStateException("save voucher order failed");
+                }
+            } catch (DuplicateKeyException duplicateKeyException) {
+                log.info("ignore duplicate key while creating order, orderId={}, userId={}, voucherId={}, failureStage=saveOrder",
+                        message.getOrderId(), userId, voucherId);
+                TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+                return;
             }
 
             OrderTimeoutMessage timeoutMessage = new OrderTimeoutMessage();

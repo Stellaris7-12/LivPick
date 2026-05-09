@@ -29,4 +29,10 @@ public class VoucherOrderController {
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
         return voucherOrderService.seckillVoucher(voucherId);
     }
+
+    @PostMapping("pay/{id}")
+    public Result payOrder(@PathVariable("id") Long orderId) {
+        boolean success = voucherOrderService.payOrder(orderId);
+        return success ? Result.ok() : Result.fail("订单状态已变化，支付失败");
+    }
 }

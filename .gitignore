@@ -32,7 +32,6 @@
 Thumbs.db
 
 # Local config (optional)
-src/main/resources/application-local.yaml
 HELP.md
 
 # 其他

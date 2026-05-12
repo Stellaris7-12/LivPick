@@ -1,380 +1,806 @@
-# hm-dianping 项目分析
+# LivPick
 
-## 1. 项目定位
+## 项目简介
 
-这是一个基于 Spring Boot 的点评类后端项目，业务场景接近“大众点评”：
+`LivPick` 是一个面向本地生活场景的后端项目，围绕店铺信息查询、优惠券活动和高并发秒杀下单展开。  
+项目基于 Spring Boot 单体架构实现，重点不在普通 CRUD，而在于把 `Redis + Lua + Kafka + Redisson` 真正落到业务链路里，解决高并发秒杀、缓存治理、异步削峰、延迟任务和最终一致性问题。
 
-- 用户手机号验证码登录
-- 店铺信息查询与分类查询
-- 探店笔记发布、点赞、热门榜
-- 用户关注、共同关注
-- 优惠券与秒杀券
-- 高并发秒杀下单
+这个仓库是在原始点评类练手项目基础上持续演进得到的，所以 `pom.xml` 中仍然保留了部分历史命名；当前主代码包路径已经统一为：
 
-项目整体是单体应用，不是微服务架构。它采用典型的分层式设计：
+```text
+src/main/java/com/livepick
+```
 
-`Controller -> Service -> Mapper -> MySQL`
+## 核心能力概览
 
-与此同时，Redis 在这个项目中不只是缓存，还承担了登录态、点赞、关注集合、GEO 附近搜索、签到、全局 ID 和秒杀异步队列等职责。
+当前项目重点能力包括：
 
-## 2. 技术栈
+- 店铺详情查询、分页查询与 GEO 附近店铺搜索
+- 优惠券与秒杀券管理
+- Redis + Lua 秒杀资格校验与库存预扣
+- Kafka 异步落库
+- Redisson 延迟队列 + SpringTask 实现超时关单与库存回流
+- Redisson Bloom Filter + 缓存空值解决缓存穿透
+- 更新数据库后删缓存，失败走 Kafka 补偿重试
 
-从 `pom.xml` 可以看出本项目的核心技术栈如下：
+项目中仍保留的基础业务能力包括：
 
-- Spring Boot 2.3.12.RELEASE
-- Spring MVC
-- MyBatis-Plus 3.4.3
-- MySQL 5.x 驱动
-- Redis
-- Redisson
-- Hutool
-- Lombok
+- 手机验证码登录与 Redis 登录态
+- 探店笔记、点赞、关注、Feed 流
+- 用户签到与连续签到统计
+
+## 技术栈
+
+- `Spring Boot 2.3.12.RELEASE`：应用启动、Web API、依赖整合
+- `MyBatis-Plus`：数据库访问与链式 CRUD
+- `MySQL`：核心业务数据持久化
+- `Redis`：缓存、秒杀库存、一人一单集合、GEO、分布式 ID、自定义锁
+- `Lua`：秒杀资格校验与 Redis 预扣原子化
+- `Kafka`：秒杀异步落库、缓存删除失败补偿重试
+- `Redisson`：分布式锁、延迟队列、布隆过滤器
+- `Docker Compose`：本地联调 Redis + Kafka
+
+## 项目结构
+
+主代码位于 `src/main/java/com/livepick`：
+
+- `controller`：REST 接口入口
+- `service / service/impl`：核心业务实现
+- `mapper`：MyBatis-Plus 数据访问
+- `mq`：Kafka Producer / Consumer、消息体、延迟队列组件
+- `task`：Spring 定时兜底任务
+- `config`：Kafka、Redisson、业务配置类
+- `utils`：缓存组件、分布式 ID、用户上下文、常量等
+
+资源与部署相关目录：
+
+- `src/main/resources/application.yaml`：项目主配置
+- `src/main/resources/db/hmdp.sql` / `hmdp2.sql`：数据库初始化与补充索引脚本
+- `src/main/resources/seckill.lua`：秒杀原子校验脚本
+- `src/main/resources/seckill_rollback.lua`：秒杀发送失败回滚脚本
+- `docker/compose`：本地 Docker Compose 中间件配置
+- `interview`：面试讲解与原理梳理文档
+
+## 当前核心架构
+
+当前重点链路可以概括为：
+
+`Redis + Lua` 前置做资格校验和库存预扣，`Kafka` 承接异步削峰与补偿消息，`Redisson` 提供锁、延迟队列和布隆过滤器能力，`MySQL` 做最终落库与状态兜底。
 
 其中：
 
-- Spring Boot 负责整体应用启动、依赖整合和 Web API 暴露
-- MyBatis-Plus 负责数据库访问与分页
-- Redis 负责高频读写场景和高并发控制
-- Redisson 负责分布式锁能力
+- Redis 不只是缓存，还承担秒杀库存、已下单用户集合、GEO、分布式 ID 等职责
+- Kafka 当前主要承接两类消息：
+  - `seckill-order-create`
+  - `cache-shop-delete-retry`
+- Redisson 当前主要承接三类能力：
+  - `RLock`
+  - `RDelayedQueue`
+  - `RBloomFilter`
 
-## 3. 工程结构
+> 当前实现已经从旧版 Redis Stream 异步秒杀方案迁移到 Kafka 方案。
 
-项目的主代码位于 `src/main/java/com/hmdp`，按职责分层：
+## 重点业务链路
 
-- `controller`
-  - 对外提供 REST 接口
-- `service`
-  - 定义业务接口
-- `service/impl`
-  - 实现具体业务逻辑
-- `mapper`
-  - MyBatis-Plus / Mapper 层
-- `entity`
-  - 数据库实体对象
-- `dto`
-  - 接口传输对象和统一返回体
-- `config`
-  - MVC、MyBatis-Plus、Redisson、异常处理等配置
-- `utils`
-  - Redis 工具、拦截器、分布式锁、正则工具、用户上下文等
+### 1. 秒杀下单链路
 
-资源文件位于 `src/main/resources`：
+要解决的问题：
 
-- `application.yaml`
-  - 基础配置
-- `db/hmdp.sql`
-  - 初始化表结构和测试数据
-- `seckill.lua`
-  - 秒杀原子校验脚本
-- `unlock.lua`
-  - Redis 分布式锁解锁脚本
+- 高并发请求直接打数据库会导致热点行竞争严重
+- 需要同时保证库存不超卖和一人一单
+- 同步写库会拖慢接口响应并压垮数据库
 
-## 4. 核心框架设计
+当前主流程：
 
-### 4.1 Web 层
-
-项目使用 Spring MVC 暴露接口，请求由各个 `Controller` 处理，例如：
-
-- `UserController`
-- `ShopController`
-- `BlogController`
-- `FollowController`
-- `VoucherController`
-- `VoucherOrderController`
-
-接口统一返回 `Result` 对象，便于前端统一处理成功、失败和数据结构。
-
-### 4.2 持久层
-
-项目使用 MyBatis-Plus：
-
-- 通过 `ServiceImpl` 简化常见 CRUD
-- 通过 `query()`、`update()` 等链式 API 提升开发效率
-- 通过 `MybatisPlusInterceptor` + `PaginationInnerInterceptor` 实现分页
-
-这意味着项目的大量数据库操作不需要手写复杂 SQL，只有个别复杂查询会放在 Mapper 或 XML 中。
-
-### 4.3 Redis 作为核心基础设施
-
-这个项目最有代表性的地方不在于普通 CRUD，而在于 Redis 的广泛使用。Redis 主要承担以下角色：
-
-- 验证码存储
-- 登录 token 存储
-- 店铺缓存
-- 空值缓存，防止缓存穿透
-- 互斥锁 / 逻辑过期，降低缓存击穿风险
-- GEO 附近店铺查询
-- 点赞集合排序
-- 关注集合交集计算
-- Feed 流收件箱
-- 用户签到位图
-- Redis 自增全局 ID
-- 秒杀库存、一人一单校验
-- Stream 消息队列异步下单
-
-可以说，这个项目的高性能设计几乎都围绕 Redis 展开。
-
-### 4.4 登录态设计
-
-项目没有采用传统 Session 登录，而是使用 Redis 保存登录用户信息：
-
-1. 用户提交手机号和验证码
-2. 服务端校验 Redis 中保存的验证码
-3. 登录成功后生成 token
-4. 将用户简要信息写入 Redis Hash
-5. 前端后续请求携带 `authorization` 头
-6. 拦截器读取 token，从 Redis 恢复用户信息
-7. 用户信息写入 `ThreadLocal`
-8. 后续业务代码通过 `UserHolder` 获取当前登录用户
-
-这里使用了两个拦截器：
-
-- `RefreshTokenInterceptor`
-  - 负责解析 token、刷新 TTL、保存用户上下文
-- `LoginInterceptor`
-  - 负责拦截必须登录后才能访问的接口
-
-这种设计比 Session 更适合前后端分离场景。
-
-## 5. 核心业务功能
-
-### 5.1 用户模块
-
-用户模块提供以下能力：
-
-- 发送验证码
-- 验证码登录
-- 查询当前登录用户
-- 查询用户详情
-- 用户签到
-- 连续签到统计
-
-其中签到功能使用 Redis Bitmap 实现：
-
-- 某月某用户的签到记录存为一个位图
-- 当日签到就是设置某一位为 `1`
-- 连续签到统计通过 `BITFIELD` 读取位图后进行位运算
-
-这是一种典型的 Redis 位图应用场景。
-
-### 5.2 店铺模块
-
-店铺模块包括：
-
-- 根据 id 查询店铺详情
-- 更新店铺信息
-- 按名称分页查询
-- 按类型分页查询
-- 按经纬度查询附近店铺
-
-这里有两个重点：
-
-#### 店铺缓存
-
-查询店铺详情时，优先从 Redis 读取，数据库作为兜底源。项目封装了 `CacheClient`，实现了三类缓存策略：
-
-- 缓存穿透保护：缓存空值
-- 缓存击穿保护：互斥锁重建
-- 热点数据保护：逻辑过期
-
-当前默认使用的是“缓存穿透保护”方案。
-
-#### 附近店铺查询
-
-项目将店铺坐标写入 Redis GEO 结构中，查询时根据经纬度和半径检索，再按距离排序后回查 MySQL 详情。
-
-这使项目具备“附近商户”这类本地生活应用常见能力。
-
-### 5.3 笔记 / 社交模块
-
-笔记模块支持：
-
-- 发布探店笔记
-- 查询热门笔记
-- 查询笔记详情
-- 点赞 / 取消点赞
-- 查询点赞用户 Top N
-- 查询关注用户发布的笔记流
-
-其核心实现方式如下：
-
-- 点赞：
-  - MySQL 维护点赞总数
-  - Redis ZSet 保存点赞用户和点赞时间
-- 热门笔记：
-  - 按 `liked` 数倒序分页
-- 关注推送：
-  - 用户发笔记后，将笔记 id 推送到粉丝的收件箱
-  - 收件箱使用 Redis ZSet 实现
-- Feed 滚动分页：
-  - 使用时间戳作为 score
-  - 通过 `reverseRangeByScoreWithScores` 实现滚动分页
-
-这是项目里社交关系和内容分发的核心逻辑。
-
-### 5.4 关注模块
-
-关注模块支持：
-
-- 关注用户
-- 取关用户
-- 判断是否已关注
-- 查询共同关注
-
-实现方式是：
-
-- MySQL 保存正式关注关系
-- Redis Set 保存当前用户关注列表
-- 共同关注通过两个 Set 的交集完成
-
-这种做法兼顾了数据持久性和查询性能。
-
-### 5.5 优惠券与秒杀模块
-
-该模块包括：
-
-- 查询店铺优惠券
-- 新增普通券
-- 新增秒杀券
-- 抢购秒杀券
-
-秒杀券是整个项目最具代表性的高并发场景。
-
-## 6. 秒杀下单主链路
-
-秒杀模块不是直接“请求一进来就操作数据库”，而是设计成“Redis 原子校验 + 异步下单”。
-
-整体流程如下：
-
-1. 用户发起秒杀请求
-2. 服务端生成订单 id
+1. 用户请求秒杀接口
+2. 服务端生成 `orderId`
 3. 执行 `seckill.lua`
-4. Lua 脚本在 Redis 中原子完成：
+4. Lua 在 Redis 中原子完成：
    - 判断库存是否充足
-   - 判断用户是否重复下单
-   - 扣减库存
-   - 记录购买用户
-   - 将订单消息写入 `stream.orders`
-5. 如果 Lua 返回成功，接口直接返回订单 id
-6. 后台单线程任务持续消费 `Redis Stream`
-7. 消费到订单消息后，再真正落库到 MySQL
+   - 判断是否重复下单
+   - 扣减 Redis 库存
+   - 记录用户下单资格
+5. Lua 成功后构造 `SeckillOrderMessage` 并发送 Kafka
+6. Kafka Consumer 异步消费消息，执行：
+   - Redisson 按 `userId` 加锁
+   - 查询数据库是否已有订单
+   - 扣减数据库库存
+   - 创建订单
+7. 下单成功后投递延迟关单消息
 
-### 6.1 为什么这样设计
+为什么这样设计：
 
-这样做有几个直接好处：
+- Redis + Lua 先把大部分无效请求挡在数据库外
+- Kafka 把瞬时高并发流量削峰成平滑消费流量
+- MySQL 只承担最终落库，不再承担所有前置资格判断
 
-- Redis 单线程 + Lua 保证校验和扣减原子性
-- 请求线程非常快，不需要同步阻塞数据库写入
-- 异步化后能承受更高并发
-- 利用 Stream 可以处理未确认消息和异常恢复
+幂等与兜底：
 
-### 6.2 防止重复下单
+- Redis Lua 入口做第一层一人一单保护
+- Consumer 端按 `userId` 加 Redisson 分布式锁
+- `tb_voucher_order(voucher_id, user_id)` 唯一索引做数据库最终兜底
 
-即使已经在 Lua 中做过“一人一单”校验，落库时依然又做了一次保护：
+### 2. 超时关单链路
 
-- 按用户维度加 Redisson 分布式锁
-- 查询数据库是否已有该用户该券的订单
-- 再扣减数据库库存并保存订单
+要解决的问题：
 
-这属于典型的“双重保护”设计，避免极端并发或消息重复消费带来的问题。
+- 下单成功但一直不支付，会长期占用库存
+- 需要在超时后自动取消订单并恢复库存
 
-## 7. 关键工具类
+当前主流程：
 
-### 7.1 `CacheClient`
+1. 订单创建成功后构造 `OrderTimeoutMessage`
+2. 写入 Redisson `RDelayedQueue`
+3. 到期后消息被搬运到阻塞队列
+4. 后台消费线程取出消息，调用 `closeTimeoutOrder(orderId)`
+5. 仅当订单仍为 `UNPAID` 时，才更新为 `CANCELLED`
+6. 回补 MySQL 秒杀库存
+7. 回补 Redis 库存并移除用户资格集合
 
-该类封装了项目的缓存通用能力，是整个项目非常重要的基础组件。
+兜底机制：
 
-它的价值在于：
+- `RDelayedQueue` 负责主链路的准实时关单
+- `SpringTask` 每 60 秒扫描一次超时未支付订单，负责扫漏
 
-- 把缓存写入逻辑统一封装
-- 把缓存穿透、击穿、逻辑过期方案统一封装
-- 让业务代码不必重复处理缓存细节
+当前默认配置：
 
-### 7.2 `RedisIdWorker`
+- 超时未支付时间：`15` 分钟
+- 兜底扫描间隔：`60000ms`
 
-这是一个基于 Redis 的全局唯一 ID 生成器，核心思路是：
+### 3. 缓存一致性链路
 
-- 高位使用时间戳
-- 低位使用 Redis 当日自增序列
+要解决的问题：
 
-它能生成趋势递增、全局唯一的 long 型 id，很适合订单号这类业务。
+- 更新数据库后如果删缓存失败，会出现脏数据
 
-### 7.3 `UserHolder`
+当前主流程：
 
-`UserHolder` 本质上是一个 `ThreadLocal<UserDTO>` 包装器，用于保存当前线程的登录用户信息。
+1. 先更新数据库
+2. 再删除缓存
+3. 如果删缓存失败，发送 `CacheDeleteRetryMessage`
+4. Kafka Consumer 继续重试删缓存
+5. 超过最大重试次数后记录错误日志
 
-业务代码无需每次显式传递用户对象，只需：
+为什么当前这样设计：
 
-- 拦截器写入
-- Service 中读取
-- 请求完成后移除
+- 比延迟双删更直接
+- 比 canal 成本更低
+- 与当前项目已有 Kafka 技术栈更契合
 
-这让登录态获取更加简洁。
+## Redis / Redisson / Kafka 在项目中的角色
 
-## 8. 数据模型
+### Redis 数据结构
 
-从 `db/hmdp.sql` 可以看出，主要表包括：
+- `String`
+  - `seckill:stock:{voucherId}`：秒杀库存
+  - `cache:shop:{shopId}`：店铺详情缓存
+  - `icr:order:{date}`：分布式 ID 自增计数
+- `Set`
+  - `seckill:order:{voucherId}`：已下单用户集合
+- `GEO`
+  - `shop:geo:{typeId}`：店铺坐标索引
 
-- `tb_user`
-  - 用户
-- `tb_user_info`
-  - 用户详情
-- `tb_shop`
-  - 店铺
-- `tb_shop_type`
-  - 店铺分类
-- `tb_blog`
-  - 探店笔记
-- `tb_blog_comments`
-  - 笔记评论
-- `tb_follow`
-  - 关注关系
-- `tb_voucher`
-  - 优惠券
-- `tb_seckill_voucher`
-  - 秒杀券
-- `tb_voucher_order`
-  - 优惠券订单
+### Redisson 组件
 
-整体上是一个典型的“本地生活 + 社交 + 营销”活动后端模型。
+- `RLock`
+  - Kafka 消费秒杀消息时按 `userId` 加锁，减少重复消费冲突
+- `RDelayedQueue`
+  - 订单超时自动关闭
+- `RBloomFilter`
+  - 店铺 ID 预过滤，拦截不存在的查询请求
 
-## 9. 运行依赖与注意事项
+### Kafka Topic
 
-从当前配置文件可以看出，项目依赖：
+- `seckill-order-create`
+  - 秒杀异步落库消息
+- `cache-shop-delete-retry`
+  - 删缓存失败补偿重试消息
 
-- MySQL 数据库
-- Redis 服务
+### 秒杀消息体字段
 
-并且配置中已经写死了数据库和 Redis 连接信息，说明这个仓库当前更偏学习/demo 项目，而不是可直接上线的生产配置方式。
+当前 `SeckillOrderMessage` 包含：
 
-另外，秒杀模块运行前需要提前在 Redis 中创建 Stream 消费组，源码注释里已经明确提示：
+- `orderId`
+- `userId`
+- `voucherId`
+- `createTime`
 
-```bash
-XGROUP CREATE stream.orders g1 0 MKSTREAM
+其中 `orderId` 由 [RedisIdWorker](src/main/java/com/livepick/utils/RedisIdWorker.java) 生成，采用“时间戳 + Redis 自增序列”的方式保证全局唯一、趋势递增。
+
+## 本地部署与启动
+
+这一节作为本项目唯一的部署入口，目标是：**在本机通过 Docker 启动 Redis 和 Kafka，配合本地 MySQL，把当前业务闭环跑通**。
+
+### 1. 部署方案
+
+当前推荐方案：
+
+- MySQL：本地自行启动
+- Redis：Docker 单实例
+- Kafka：Docker 单 broker、KRaft 模式
+
+这样设计的原因是：
+
+- 当前目标是先验证业务闭环，不是验证中间件高可用
+- Kafka 当前 topic 配置就是单分区、单副本
+- 单 broker / 单实例更容易部署、排障和观察日志
+
+适合：
+
+- 本地开发
+- 功能联调
+- 小规模验证异步链路
+
+不适合：
+
+- 生产环境
+- 高可用容灾测试
+- 更真实的多 broker 压测
+
+### 2. 依赖环境
+
+开始前请先确认：
+
+1. 已安装 Docker Desktop
+2. Docker Desktop 当前使用 Linux containers
+3. 本机端口未被占用：
+   - `6379`：Redis
+   - `9092`：Kafka client
+   - `9093`：Kafka controller
+4. MySQL 已准备好，且项目可访问
+
+### 3. Docker Compose 目录
+
+相关文件位于：
+
+```text
+docker/
+  compose/
+    docker-compose.middleware.yml
+    .env.example
+    README.md
 ```
 
-如果没有提前创建，秒杀订单消费者会报错。
+### 4. 中间件配置文件
 
-## 10. 项目特点总结
+当前 Compose 会启动两个容器：
 
-这个项目最核心的价值不在于“表有多少、接口有多少”，而在于它集中展示了很多典型 Redis 实战方案：
+1. `livpick-redis`
+2. `livpick-kafka`
 
-- Redis 缓存穿透处理
-- Redis 互斥锁
-- 逻辑过期缓存重建
-- Redis GEO
-- Redis Bitmap
-- Redis Set 交集
-- Redis ZSet 排行与 Feed 流
-- Redis Stream 异步消息
-- Lua 原子脚本
-- Redis 全局 ID
-- Redisson 分布式锁
+默认端口：
 
-所以如果把它当成“一个 Spring Boot 练手项目”来看，重点不只是 CRUD，而是：
+- Redis：`localhost:6379`
+- Kafka：`localhost:9092`
 
-**如何把 Redis 深度融入业务系统，解决缓存、登录、高并发和社交数据结构问题。**
+这与当前 `application.yaml` 默认配置一致，通常不需要额外改代码配置。
 
-## 11. 一句话总结
+### 5. 启动步骤
 
-`hm-dianping` 是一个基于 Spring Boot + MyBatis-Plus + MySQL + Redis 的点评类后端项目，重点演示了 Redis 在登录态、缓存优化、GEO 搜索、社交关系、签到统计和秒杀高并发场景中的实际用法。
+先进入目录：
+
+```powershell
+cd docker\compose
+```
+
+如果本目录下还没有 `.env` 文件，先基于 `.env.example` 创建一份 `.env`。  
+默认值通常可以直接使用。
+
+启动 Redis + Kafka：
+
+```powershell
+# --env-file .env：指定环境变量文件
+# -f docker-compose.middleware.yml：指定 compose 配置文件
+# up：创建并启动服务
+# -d：后台运行
+docker compose --env-file .env -f docker-compose.middleware.yml up -d
+```
+
+查看当前容器状态：
+
+```powershell
+# ps：查看当前 compose 管理的容器状态
+docker compose --env-file .env -f docker-compose.middleware.yml ps
+# docker ps：查看当前正在运行的所有容器
+docker ps
+```
+
+停止但保留容器：后面还会继续联调，希望下次直接再启动
+
+```powershell
+docker compose --env-file .env -f docker-compose.middleware.yml stop
+```
+
+
+
+执行了 `stop` 命令（停止容器但保留容器和卷），想再次运行这些容器
+
+
+```powershell
+# 使用 `start` 命令：直接启动已存在的容器，不检查配置变化：（推荐）
+docker compose --env-file .env -f docker-compose.middleware.yml start
+# 使用 `up` 命令：如果容器已存在且配置未变，它会直接启动现有容器；如果检测到配置或镜像有变化，可能会重新创建容器（但卷数据仍保留）
+docker compose --env-file .env -f docker-compose.middleware.yml up -d
+```
+
+
+停止并移除容器：这轮联调结束了，想把容器收掉，但还想保留 Redis / Kafka 的数据，下次再起时继续用
+
+```powershell
+# down：停止并移除当前 compose 创建的容器和网络
+docker compose --env-file .env -f docker-compose.middleware.yml down
+```
+
+关闭并删除卷：彻底重置本地中间件状态
+
+```powershell
+# -v：连同命名卷一起删除，会清空 Redis / Kafka 持久化数据
+docker compose --env-file .env -f docker-compose.middleware.yml down -v
+```
+
+### 6. IDEA 环境变量配置
+
+如果你的 Spring Boot 项目是**直接在 IDEA 里启动**，而 MySQL / Redis / Kafka 是跑在本机或 Docker 映射到宿主机端口，那么推荐通过 IDEA 的运行配置注入环境变量，而不是把真实密码写进仓库里的 `application.yaml`。
+
+当前 `application.yaml` 使用的是占位符写法，例如：
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/hmdp?useSSL=false&serverTimezone=UTC
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+  redis:
+    host: ${REDIS_HOST:127.0.0.1}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+```
+
+含义是：
+
+- Spring 启动时优先读取环境变量
+- 如果没有对应环境变量，就使用冒号后的默认值
+
+#### 配置路径
+
+1. 打开 IDEA
+2. 右上角找到启动项，例如 `LivPickApplication`
+3. 点击下拉框
+4. 选择 `Edit Configurations...`
+5. 在对应的 Spring Boot 运行配置里找到 `Environment variables`
+
+#### 推荐环境变量
+
+如果你当前是：
+
+- MySQL 本机启动
+- Redis / Kafka 通过 Docker 映射到宿主机端口
+- Spring Boot 直接在 IDEA 中运行
+
+那么推荐填写下面这组：
+
+```text
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USERNAME=root
+DB_PASSWORD=你的MySQL密码
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=
+KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092
+```
+
+如果 IDEA 需要一行格式，也可以写成：
+
+```text
+DB_HOST=127.0.0.1;DB_PORT=3306;DB_USERNAME=root;DB_PASSWORD=你的MySQL密码;REDIS_HOST=127.0.0.1;REDIS_PORT=6379;REDIS_PASSWORD=;KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092
+```
+
+#### 配置说明
+
+- `DB_HOST` / `DB_PORT`：MySQL 地址和端口
+- `DB_USERNAME` / `DB_PASSWORD`：MySQL 账号密码
+- `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD`：Redis 连接信息
+- `KAFKA_BOOTSTRAP_SERVERS`：Kafka broker 地址
+
+#### 一个关键区别
+
+- 如果应用跑在 IDEA 里：Redis / Kafka 地址写 `127.0.0.1` 或 `localhost`
+- 如果应用以后也跑进 Docker 容器里：地址就不能写 `127.0.0.1`，而应该写 compose 服务名，例如 `redis`、`kafka:9092`
+
+你当前这个项目阶段，应用是直接在 IDEA 里启动，所以推荐使用：
+
+- `REDIS_HOST=127.0.0.1`
+- `KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:9092`
+
+### 7. MySQL 初始化
+
+请先准备 `hmdp` 数据库，并导入：
+
+```text
+src/main/resources/db/hmdp.sql
+```
+
+如需补充新版索引脚本，可同步参考：
+
+```text
+src/main/resources/db/hmdp2.sql
+```
+
+### 8. 启动后验证
+
+#### 验证 Redis
+
+```powershell
+# exec：在容器内执行命令
+# -it：进入交互式终端
+docker exec -it livpick-redis redis-cli
+```
+
+进入后执行：
+
+```text
+PING
+```
+
+返回 `PONG` 说明正常。
+
+#### 验证 Kafka
+
+查看日志：
+
+```powershell
+# logs：查看容器日志
+docker logs livpick-kafka
+# -f：持续跟踪日志输出
+docker logs -f livpick-kafka
+```
+
+查看 topic：
+
+```powershell
+# /opt/kafka/bin/kafka-topics.sh：Kafka 自带的 topic 管理工具
+# --bootstrap-server：指定要连接的 Kafka broker 地址
+# --list：列出所有 topic
+docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+### 9. Topic 说明
+
+当前项目会用到的 topic：
+
+- `seckill-order-create`
+- `cache-shop-delete-retry`
+
+应用启动后，`KafkaTopicConfig` 通常会自动创建。  
+如果你想手动创建：
+
+```powershell
+# --create：创建 topic
+# --topic：topic 名称
+# --partitions 1：分区数为 1
+# --replication-factor 1：副本数为 1，适合当前单 broker 联调环境
+docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic seckill-order-create --partitions 1 --replication-factor 1
+
+docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic cache-shop-delete-retry --partitions 1 --replication-factor 1
+```
+
+### 10. 常用 Docker / 中间件命令
+
+#### 查看与管理容器
+
+```powershell
+# ps：查看当前 compose 项目的容器状态
+docker compose --env-file .env -f docker-compose.middleware.yml ps
+# docker ps：查看所有运行中的容器
+docker ps
+# docker ps -a：查看所有容器，包括已停止的
+docker ps -a
+# stop：停止容器，但保留容器和卷数据
+docker compose --env-file .env -f docker-compose.middleware.yml stop
+# restart：重启 compose 项目中的容器
+docker compose --env-file .env -f docker-compose.middleware.yml restart
+# up -d redis：只启动 redis 服务并后台运行
+docker compose --env-file .env -f docker-compose.middleware.yml up -d redis
+# up -d kafka：只启动 kafka 服务并后台运行
+docker compose --env-file .env -f docker-compose.middleware.yml up -d kafka
+# stop redis：只停止 redis 服务
+docker compose --env-file .env -f docker-compose.middleware.yml stop redis
+# stop kafka：只停止 kafka 服务
+docker compose --env-file .env -f docker-compose.middleware.yml stop kafka
+```
+
+#### 查看日志
+
+```powershell
+# 查看 Redis 一次性日志输出
+docker logs livpick-redis
+# -f：持续跟踪 Redis 日志
+docker logs -f livpick-redis
+# 查看 Kafka 一次性日志输出
+docker logs livpick-kafka
+# -f：持续跟踪 Kafka 日志
+docker logs -f livpick-kafka
+# compose logs：查看当前 compose 项目的聚合日志
+docker compose --env-file .env -f docker-compose.middleware.yml logs
+# 只持续跟踪 kafka 服务日志
+docker compose --env-file .env -f docker-compose.middleware.yml logs -f kafka
+```
+
+#### 进入容器
+
+```powershell
+# sh：进入 Redis 容器的 shell
+docker exec -it livpick-redis sh
+# 直接进入 Redis 客户端
+docker exec -it livpick-redis redis-cli
+# bash：进入 Kafka 容器 shell
+docker exec -it livpick-kafka bash
+```
+
+#### 常用 Redis 命令
+
+```powershell
+# PING：验证 Redis 是否可用
+docker exec -it livpick-redis redis-cli PING
+# GET：查看当前秒杀库存
+docker exec -it livpick-redis redis-cli GET seckill:stock:1
+# SMEMBERS：查看某张券的已下单用户集合
+docker exec -it livpick-redis redis-cli SMEMBERS seckill:order:1
+# SET：手动预置秒杀库存
+docker exec -it livpick-redis redis-cli SET seckill:stock:1 100
+# DEL：清空该券的历史下单用户集合
+docker exec -it livpick-redis redis-cli DEL seckill:order:1
+```
+
+#### 常用 Kafka 命令
+
+```powershell
+# --list：列出所有 topic
+docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+# --describe：查看某个 topic 的分区、副本等详情
+docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic seckill-order-create
+# --create：手动创建 topic
+docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic seckill-order-create --partitions 1 --replication-factor 1
+```
+
+## 业务闭环验证
+
+建议按下面顺序验证，不要一上来就压测。
+
+### 1. 预置秒杀库存
+
+当前代码里没有看到自动把秒杀券库存预热到 Redis 的逻辑，所以验证秒杀前需要先手动预置。
+
+例如验证 `voucherId=1`：
+
+```powershell
+docker exec -it livpick-redis redis-cli SET seckill:stock:1 100
+docker exec -it livpick-redis redis-cli DEL seckill:order:1
+```
+
+这样可以确保：
+
+- `seckill:stock:1` 有初始库存
+- `seckill:order:1` 不残留历史下单用户集合
+
+### 2. 验证店铺查询缓存链路
+
+- 启动 MySQL、Redis、Kafka、项目
+- 调用店铺查询接口
+- 观察 Redis 是否写入 `cache:shop:{id}`
+- 验证布隆过滤器和缓存空值是否生效
+
+### 3. 验证秒杀下单链路
+
+- 调用秒杀接口
+- 观察 Redis 库存是否减少
+- 观察 `seckill:order:{voucherId}` 是否写入 `userId`
+- 观察 Kafka 是否收到下单消息
+- 验证 MySQL 是否成功创建订单
+
+### 4. 验证超时关单链路
+
+- 下单成功后不支付
+- 等待超过 `15` 分钟，或临时将配置缩短后联调
+- 验证：
+  - 订单状态是否更新为取消
+  - MySQL 库存是否回补
+  - Redis 库存和用户资格集合是否回补
+
+### 5. 验证缓存删除补偿链路
+
+- 调用店铺更新接口
+- 模拟删缓存失败
+- 观察 Kafka 是否收到补偿消息
+- 验证补偿 Consumer 是否继续执行删除重试
+
+## 当前进度与后续迭代
+
+### 1. 本轮优化目标
+
+本轮优化的目标是先把简历中新增的核心能力补进当前项目分支，形成可编译、可继续扩展的代码骨架，重点覆盖以下 4 个方向：
+
+1. Kafka 替换 Redis Stream，实现秒杀异步落库
+2. Kafka 实现缓存删除补偿重试
+3. Redisson 延迟队列实现超时关单与库存回流骨架
+4. Redisson Bloom Filter + 缓存空值实现缓存穿透防护骨架
+
+### 2. 当前已完成内容
+
+#### 2.1 Kafka 异步落库
+
+已完成：
+
+- `seckill.lua` 已由“校验 + Redis Stream 入队”改为“只做库存校验、一人一单校验和 Redis 预扣减”
+- `VoucherOrderServiceImpl.seckillVoucher()` 已改为 Lua 成功后发送 Kafka 下单消息
+- 已新增 `SeckillOrderMessage`、Kafka Producer、Kafka Consumer
+- Kafka Consumer 已实现异步消费、查重、数据库扣库存、订单创建
+- 消费端已保留 Redisson 分布式锁，避免重复消费导致重复下单
+- Kafka 发送失败时，已通过 `seckill_rollback.lua` 回滚 Redis 资格占用
+- 已补充支付入口和基于订单状态条件更新的支付成功逻辑
+- 已补充消费异常日志和重复消费分支处理
+
+核心文件：
+
+- [VoucherOrderServiceImpl](src/main/java/com/livepick/service/impl/VoucherOrderServiceImpl.java)
+- [LivPickKafkaProducer](src/main/java/com/livepick/mq/producer/LivPickKafkaProducer.java)
+- [SeckillOrderConsumer](src/main/java/com/livepick/mq/consumer/SeckillOrderConsumer.java)
+- [VoucherOrderController](src/main/java/com/livepick/controller/VoucherOrderController.java)
+- [seckill.lua](src/main/resources/seckill.lua)
+- [seckill_rollback.lua](src/main/resources/seckill_rollback.lua)
+
+#### 2.2 缓存删除补偿重试
+
+已完成：
+
+- 店铺更新流程已改为“更新数据库后删除缓存”
+- 删除缓存失败时，已发送 Kafka 补偿消息
+- 已新增 `CacheDeleteRetryMessage`
+- 已新增 Kafka Consumer 执行删缓存重试
+- 已支持最大重试次数控制和失败日志输出
+
+核心文件：
+
+- [ShopServiceImpl](src/main/java/com/livepick/service/impl/ShopServiceImpl.java)
+- [CacheDeleteRetryConsumer](src/main/java/com/livepick/mq/consumer/CacheDeleteRetryConsumer.java)
+- [CacheClient](src/main/java/com/livepick/utils/CacheClient.java)
+
+#### 2.3 Redisson 延迟队列超时关单
+
+已完成：
+
+- 订单创建成功后已投递 Redisson 延迟队列消息
+- 已新增 `OrderTimeoutMessage`
+- 延迟队列消费者已实现到期关单
+- 关单逻辑已使用订单状态条件更新，避免支付与关单并发冲突
+- 关单成功后已回补数据库库存和 Redis 秒杀资格
+- 已新增定时扫描任务作为兜底
+- 已补充支付成功与超时关单的最小闭环，支持演示状态竞争场景
+
+核心文件：
+
+- [OrderTimeoutDelayQueueManager](src/main/java/com/livepick/mq/delay/OrderTimeoutDelayQueueManager.java)
+- [OrderTimeoutFallbackTask](src/main/java/com/livepick/task/OrderTimeoutFallbackTask.java)
+- [VoucherOrderServiceImpl](src/main/java/com/livepick/service/impl/VoucherOrderServiceImpl.java)
+
+#### 2.4 Redisson Bloom Filter + 缓存空值
+
+已完成：
+
+- 已新增 `ShopBloomFilterService`，基于 Redisson `RBloomFilter` 初始化店铺布隆过滤器
+- 店铺查询链路已接入“布隆过滤器预判 + 缓存空值兜底”
+- 缓存工具类已新增布隆过滤器版查询方法
+- 启动时若过滤器为空，会尝试从数据库装载店铺 ID
+
+核心文件：
+
+- [ShopBloomFilterService](src/main/java/com/livepick/service/ShopBloomFilterService.java)
+- [CacheClient](src/main/java/com/livepick/utils/CacheClient.java)
+- [ShopServiceImpl](src/main/java/com/livepick/service/impl/ShopServiceImpl.java)
+
+#### 2.5 基础配置与可编译状态
+
+已完成：
+
+- 新增 Kafka 依赖和 Topic 配置
+- 新增 `LivPickProperties` 统一管理 Kafka、延迟队列、缓存重试、布隆过滤器配置
+- `RedissonConfig` 已改为从 `application.yaml` 读取 Redis 配置
+- Lombok 已升级到兼容当前 JDK 的版本
+- `tb_voucher_order` 已补充 `(voucher_id, user_id)` 唯一索引脚本，作为一人一单数据库兜底
+- 当前分支已执行 `mvn compile` 并通过
+- 已新增 Kafka Consumer 与缓存补偿 Consumer 的定向单元测试并通过
+
+### 3. 后续代码待完善内容
+
+#### 3.1 Kafka 秒杀链路
+
+- 补充更完整的消息发送补偿机制，例如本地消息表、Outbox 或 Redis 待发送标记
+- 增加 Kafka 消费失败重试、死信队列和消息追踪能力
+- 完善消费者幂等处理，避免极端情况下重复消费带来的边界问题
+- 评估是否需要把“重复键冲突”与“真实系统异常”进一步拆分成更细的监控指标
+
+#### 3.2 缓存删除补偿链路
+
+- 增加延迟重试、指数退避和死信队列
+- 将当前店铺缓存补偿抽象为通用补偿组件，覆盖更多业务缓存
+- 增加告警机制，而不只是输出错误日志
+- 进一步细化消息体字段，例如重试时间、来源模块、失败原因
+
+#### 3.3 延迟关单链路
+
+- 对接真实支付成功链路
+- 增加支付成功后取消延迟消息或消费端跳过已支付订单的完整逻辑
+- 进一步细化多实例部署下的并发消费和幂等控制
+- 把库存回补逻辑整理为更统一的补偿方法
+
+#### 3.4 Bloom Filter 链路
+
+- 增加新增店铺、删除店铺时的增量同步维护逻辑
+- 增加手动重建入口和定时重建任务
+- 基于真实数据量重新评估 `expectedInsertions` 和误判率参数
+- 将布隆过滤器方案扩展到更多热点查询场景
+
+### 4. 测试与验证待完善
+
+- 增加 Kafka 秒杀下单主链路集成测试
+- 增加延迟关单与库存回补测试
+- 增加布隆过滤器误判率和穿透拦截效果验证
+- 补充压测，关注吞吐、响应时间、数据库压力和缓存命中率变化
+
+当前已完成的定向测试：
+
+- Kafka 下单 Consumer 消息委派与异常抛出测试
+- 缓存删除补偿 Consumer 重试与重试上限测试
+
+### 5. 服务部署待完善
+
+如果要把当前能力完整联调或演示，还需要补齐以下环境和文档：
+
+- Kafka 服务部署与 Topic 检查脚本
+- Redis 服务部署，支撑 Lua、分布式锁、延迟队列、布隆过滤器
+- MySQL 服务部署与初始化数据
+- Docker Compose 或部署文档
+- 本地联调说明，包括 Kafka、Redis、MySQL 的启动顺序和配置项说明
+
+建议补充的部署类内容：
+
+- `KAFKA_BOOTSTRAP_SERVERS` 配置说明
+- `REDIS_HOST` / `REDIS_PASSWORD` 配置说明
+- `DB_HOST` / `DB_USERNAME` / `DB_PASSWORD` 配置说明
+- Topic 创建、消费者组校验和本地联调脚本
+
+### 6. 建议的下一步开发顺序
+
+建议按下面顺序继续完善：
+
+1. 先补 Kafka 幂等补偿和消费失败治理，稳住秒杀主链路
+2. 再补支付回调和超时关单闭环增强
+3. 再补缓存补偿重试增强版
+4. 最后补布隆过滤器增量维护、压测和部署文档
+
+## 当前限制与扩展方向
+
+当前实现更适合开发联调、学习演示和面试讲解，还不是完整生产级方案。  
+后续可以继续往下扩展：
+
+- Kafka 从单 broker 升级到多 broker KRaft 集群
+- Redis 从单实例升级到更高可用部署
+- 秒杀库存预热自动化
+- 更完善的监控、告警和失败追踪
+- 更真实的压测环境与基准数据
+- 更强一致性的消息与补偿体系
+
+## 辅助文档
+
+如果你想继续看更细的原理、面试和部署说明，可以参考：
+
+- [docker/compose/README.md](docker/compose/README.md)
+- [interview/Redisson与Kafka项目理解强化.md](interview/Redisson与Kafka项目理解强化.md)
+- [interview/Redisson 实现细节指南.md](interview/Redisson%20实现细节指南.md)
+
+## 一句话总结
+
+`LivPick` 当前已经从普通点评类练手项目演进为一个以 `Redis + Lua + Kafka + Redisson` 为核心的本地生活秒杀实战项目，重点展示了高并发秒杀、缓存治理、延迟任务和最终一致性方案在真实业务链路中的落地方式。

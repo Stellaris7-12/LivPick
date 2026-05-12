@@ -1,0 +1,49 @@
+# 定义服务（容器）
+services:
+  # Redis 服务 - 用作缓存或消息代理
+  redis:
+    image: redis:7.4-alpine          # 使用官方 Redis 镜像，基于轻量级 Alpine Linux
+    container_name: livpick-redis    # 固定容器名称，方便其他服务引用
+    ports:
+      - "6379:6379"                  # 将宿主机的 6379 端口映射到容器的 6379 端口（Redis 默认端口）
+    command: ["redis-server", "--appendonly", "yes"]   # 启动 Redis 并开启 AOF 持久化（数据追加写盘）
+    volumes:
+      - redis-data:/data             # 挂载命名卷 redis-data 到容器内的 /data 目录（持久化存储数据）
+    restart: unless-stopped          # 策略：除非手动停止，否则总是自动重启
+
+  # Kafka 服务 - 分布式消息队列
+  kafka:
+    image: apache/kafka:4.1.2        # 使用 Apache Kafka 官方镜像（版本 4.1.2）
+    container_name: livpick-kafka    # 固定容器名称
+    ports:
+      - "9092:9092"                  # 映射客户端连接端口（PLAINTEXT 协议）
+      - "9093:9093"                  # 映射控制器（Controller）内部通信端口
+    environment:
+      # 节点基础配置
+      KAFKA_NODE_ID: 1               # 当前 Kafka 节点的唯一 ID
+      KAFKA_PROCESS_ROLES: broker,controller   # 该节点同时担任 broker 和 controller 角色（KRaft 模式，不依赖 ZooKeeper）
+      
+      # 监听器配置（定义 Kafka 监听的网络接口和端口）
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093   # 分别对外服务（broker）和控制器间通信
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092   # 告知客户端使用 localhost:9092 连接（适合本地开发）
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER               # 声明名为 CONTROLLER 的监听器用于控制器通信
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT   # 映射每个监听器使用的安全协议（均为明文 PLAINTEXT）
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT               # broker 之间使用 PLAINTEXT 监听器通信
+      
+      # Raft（KRaft）一致性配置
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"        # 定义控制器投票者：节点 1 通过 localhost:9093 参与投票
+      
+      # 主题与分区配置（适用于单节点开发环境）
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1          # 消费者 offset 存储主题的副本数（单节点设为 1）
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1  # 事务状态日志的副本数
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1             # 事务状态日志的最小 ISR 副本数
+      KAFKA_NUM_PARTITIONS: 1                            # 自动创建主题时的默认分区数（单节点足够）
+    
+    volumes:
+      - kafka-data:/var/lib/kafka/data   # 挂载命名卷 kafka-data 到 Kafka 数据目录，持久化消息数据
+    restart: unless-stopped              # 自动重启策略（除非手动停止）
+
+# 定义命名卷（持久化存储）
+volumes:
+  redis-data:     # Redis 数据卷（独立于容器生命周期）
+  kafka-data:     # Kafka 数据卷（独立于容器生命周期）

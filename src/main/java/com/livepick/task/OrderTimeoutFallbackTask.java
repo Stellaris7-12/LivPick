@@ -1,6 +1,6 @@
 package com.livepick.task;
 
-import com.livepick.service.IVoucherOrderService;
+import com.livepick.service.IOrderTimeoutService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -9,10 +9,10 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class OrderTimeoutFallbackTask {
 
-    private final IVoucherOrderService voucherOrderService;
+    private final IOrderTimeoutService orderTimeoutService;
 
     @Scheduled(fixedDelayString = "${livpick.order.timeout-scan-interval-ms}")
     public void scanTimeoutOrders() {
-        voucherOrderService.scanAndCloseTimeoutOrders();
+        orderTimeoutService.scanAndCloseTimeoutOrders();
     }
 }

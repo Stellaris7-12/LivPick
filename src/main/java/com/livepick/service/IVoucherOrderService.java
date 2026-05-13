@@ -19,9 +19,5 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     void createVoucherOrder(SeckillOrderMessage message);
 
-    boolean closeTimeoutOrder(Long orderId);
-
     boolean payOrder(Long orderId);
-
-    void scanAndCloseTimeoutOrders();
 }

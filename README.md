@@ -132,7 +132,7 @@ src/main/java/com/livepick
 1. 订单创建成功后构造 `OrderTimeoutMessage`
 2. 写入 Redisson `RDelayedQueue`
 3. 到期后消息被搬运到阻塞队列
-4. 后台消费线程取出消息，调用 `closeTimeoutOrder(orderId)`
+4. 后台消费线程取出消息，调用独立的超时处理服务执行 `closeTimeoutOrder(orderId)`
 5. 仅当订单仍为 `UNPAID` 时，才更新为 `CANCELLED`
 6. 回补 MySQL 秒杀库存
 7. 回补 Redis 库存并移除用户资格集合
@@ -141,6 +141,7 @@ src/main/java/com/livepick
 
 - `RDelayedQueue` 负责主链路的准实时关单
 - `SpringTask` 每 60 秒扫描一次超时未支付订单，负责扫漏
+- 当前已将“超时消息投递”和“超时关单处理”拆分为不同组件，避免订单主服务与延迟队列之间形成循环依赖
 
 当前默认配置：
 
@@ -312,9 +313,7 @@ docker compose --env-file .env -f docker-compose.middleware.yml stop
 ```
 
 
-
 执行了 `stop` 命令（停止容器但保留容器和卷），想再次运行这些容器
-
 
 ```powershell
 # 使用 `start` 命令：直接启动已存在的容器，不检查配置变化：（推荐）
@@ -474,7 +473,7 @@ docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 
 - `seckill-order-create`
 - `cache-shop-delete-retry`
 
-应用启动后，`KafkaTopicConfig` 通常会自动创建。  
+Springboot应用启动后，`KafkaTopicConfig` 通常会自动创建。  
 如果你想手动创建：
 
 ```powershell
@@ -566,13 +565,167 @@ docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 
 docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic seckill-order-create --partitions 1 --replication-factor 1
 ```
 
+## 测试方案
+
+建议按下面顺序推进测试，不要一上来就直接做集成联调或压测：
+
+1. 单元测试
+2. 接口测试
+3. 集成测试 / 业务闭环验证
+4. 压测
+
+这样安排的原因是：
+
+- 单元测试最快，先验证局部逻辑是否正确
+- 接口测试先确认 API 行为和主流程是否符合预期
+- 集成测试成本最高，放在最后做完整链路验证
+- 压测依赖中间件、数据库和数据准备，应该建立在前面三层基本稳定之后
+
 ## 业务闭环验证
 
+这一节建议按“单元测试 → 接口测试 → 集成测试”的顺序执行。  
+如果只是快速排障，不必每次都完整走到底；但如果要验证当前分支是否可演示，建议至少走完单元测试和一轮集成验证。
+
+### 1. 单元测试
+
+当前仓库里已经具备的定向单元测试主要是：
+
+- `src/test/java/com/livepick/mq/consumer/SeckillOrderConsumerTest.java`
+- `src/test/java/com/livepick/mq/consumer/CacheDeleteRetryConsumerTest.java`
+
+这两类测试的价值是：
+
+- 启动快
+- 不依赖真实 Redis / Kafka / MySQL 环境
+- 可以先验证消息委派、异常抛出、补偿重试边界这些局部逻辑
+
+推荐先执行：
+
+```powershell
+mvn "-Dmaven.repo.local=C:\Users\heyunhui\.m2\repository" "-Dtest=com.livepick.mq.consumer.SeckillOrderConsumerTest,com.livepick.mq.consumer.CacheDeleteRetryConsumerTest" test
+```
+
+通过标准：
+
+- `SeckillOrderConsumerTest` 能验证消息被正确委派到订单服务
+- `CacheDeleteRetryConsumerTest` 能验证删缓存失败后的重试和重试上限逻辑
+
+### 2. 接口测试
+
+接口测试的目标是：**在项目已经启动的前提下，先验证 API 行为是否正确，再进入更重的集成联调**。
+
+建议至少覆盖下面几类接口：
+
+#### 2.1 店铺查询接口
+
+- 调用店铺详情查询接口
+- 预期：
+  - 存在的店铺返回成功
+  - 不存在的店铺返回“店铺不存在”
+- 可额外观察：
+  - Redis 是否写入 `cache:shop:{id}`
+
+#### 2.2 秒杀下单接口
+
+- 调用秒杀接口
+- 预期：
+  - 库存充足且未重复下单时返回成功和 `orderId`
+  - 库存不足时返回失败
+  - 同一用户重复下单时返回失败
+
+#### 2.3 支付接口
+
+- 对未支付订单调用支付接口
+- 预期：
+  - 首次支付成功
+  - 已支付或已取消订单再次支付时返回“订单状态已变化，支付失败”
+
+#### 2.4 店铺更新接口
+
+- 调用店铺更新接口
+- 预期：
+  - 数据库更新成功
+  - 正常情况下缓存被删除
+  - 异常情况下可继续观察补偿消息
+
+这一层主要关注：
+
+- 接口返回是否符合预期
+- 基础状态流转是否正确
+
+不要求在这一层就把 Redis / Kafka / MySQL 每个细节全部查完。
+
+### 3. 集成测试 / 业务闭环验证
+
+这一层才是真正的完整链路联调。  
 建议按下面顺序验证，不要一上来就压测。
 
-### 1. 预置秒杀库存
+#### 3.1 预置秒杀库存
 
-当前代码里没有看到自动把秒杀券库存预热到 Redis 的逻辑，所以验证秒杀前需要先手动预置。
+当前项目已经补了一个一键预热脚本，默认会从 MySQL 的 `tb_seckill_voucher` 查询秒杀券库存，然后写入 Redis：
+
+```powershell
+.\scripts\preheat-seckill-redis.ps1
+```
+
+可选参数：
+
+```powershell
+# 只预热当前处于生效时间内的秒杀券
+.\scripts\preheat-seckill-redis.ps1 -OnlyActive
+
+# 只预热指定 voucherId，多个用逗号分隔
+.\scripts\preheat-seckill-redis.ps1 -VoucherIds 1,2,3
+```
+
+脚本默认读取当前项目已经在使用的环境变量：
+
+- `DB_HOST`
+- `DB_PORT`
+- `DB_NAME`，默认 `hmdp`
+- `DB_USERNAME`
+- `DB_PASSWORD`
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_PASSWORD`
+
+如果你是在 PowerShell 里直接执行脚本，而不是通过 IDEA 启动 Spring Boot，那么需要先在当前终端会话里临时设置这些环境变量。  
+否则脚本拿不到你的数据库密码，就会使用默认值，常见报错是：
+
+```text
+Access denied for user 'root'@'localhost' (using password: NO)
+```
+
+可以先这样设置，再执行预热脚本：
+
+```powershell
+$env:DB_HOST="127.0.0.1"
+$env:DB_PORT="3306"
+$env:DB_NAME="hmdp"
+$env:DB_USERNAME="root"
+$env:DB_PASSWORD="你的MySQL密码"
+
+$env:REDIS_HOST="127.0.0.1"
+$env:REDIS_PORT="6379"
+$env:REDIS_PASSWORD=""
+
+.\scripts\preheat-seckill-redis.ps1
+```
+
+如果你只想临时补数据库密码，最少也可以先执行：
+
+```powershell
+$env:DB_PASSWORD="你的MySQL密码"
+.\scripts\preheat-seckill-redis.ps1
+```
+
+说明：
+
+- 这里的 `$env:XXX=...` 只在**当前 PowerShell 窗口**里生效
+- 关闭终端后会失效，不会写回仓库配置文件
+- 这和 IDEA Run Configuration 里的环境变量不是同一个作用域
+
+如果你当前不想用脚本，也可以继续手动预置：
 
 例如验证 `voucherId=1`：
 
@@ -586,14 +739,14 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 - `seckill:stock:1` 有初始库存
 - `seckill:order:1` 不残留历史下单用户集合
 
-### 2. 验证店铺查询缓存链路
+#### 3.2 验证店铺查询缓存链路
 
 - 启动 MySQL、Redis、Kafka、项目
 - 调用店铺查询接口
 - 观察 Redis 是否写入 `cache:shop:{id}`
 - 验证布隆过滤器和缓存空值是否生效
 
-### 3. 验证秒杀下单链路
+#### 3.3 验证秒杀下单链路
 
 - 调用秒杀接口
 - 观察 Redis 库存是否减少
@@ -601,7 +754,7 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 - 观察 Kafka 是否收到下单消息
 - 验证 MySQL 是否成功创建订单
 
-### 4. 验证超时关单链路
+#### 3.4 验证超时关单链路
 
 - 下单成功后不支付
 - 等待超过 `15` 分钟，或临时将配置缩短后联调
@@ -610,12 +763,29 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
   - MySQL 库存是否回补
   - Redis 库存和用户资格集合是否回补
 
-### 5. 验证缓存删除补偿链路
+#### 3.5 验证缓存删除补偿链路
 
 - 调用店铺更新接口
 - 模拟删缓存失败
 - 观察 Kafka 是否收到补偿消息
 - 验证补偿 Consumer 是否继续执行删除重试
+
+### 4. 压测
+
+压测建议放在最后做，至少等下面条件满足后再进行：
+
+- 定向单元测试通过
+- 接口行为符合预期
+- 一轮完整业务闭环联调已经跑通
+
+压测时重点关注：
+
+- 秒杀接口吞吐
+- 平均响应时间和 P95 / P99
+- Redis 命中率与热点 key 表现
+- Kafka 消费堆积情况
+- MySQL 库存扣减和订单写入压力
+- 超时关单链路是否对主链路造成明显干扰
 
 ## 当前进度与后续迭代
 
@@ -679,11 +849,13 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 - 关单成功后已回补数据库库存和 Redis 秒杀资格
 - 已新增定时扫描任务作为兜底
 - 已补充支付成功与超时关单的最小闭环，支持演示状态竞争场景
+- 已将超时关单处理从订单主服务中拆出，解决应用启动时的 Bean 循环依赖问题
 
 核心文件：
 
 - [OrderTimeoutDelayQueueManager](src/main/java/com/livepick/mq/delay/OrderTimeoutDelayQueueManager.java)
 - [OrderTimeoutFallbackTask](src/main/java/com/livepick/task/OrderTimeoutFallbackTask.java)
+- [OrderTimeoutServiceImpl](src/main/java/com/livepick/service/impl/OrderTimeoutServiceImpl.java)
 - [VoucherOrderServiceImpl](src/main/java/com/livepick/service/impl/VoucherOrderServiceImpl.java)
 
 #### 2.4 Redisson Bloom Filter + 缓存空值
@@ -745,8 +917,9 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 
 ### 4. 测试与验证待完善
 
-- 增加 Kafka 秒杀下单主链路集成测试
-- 增加延迟关单与库存回补测试
+- 增加 Kafka 秒杀下单主链路自动化集成测试
+- 增加延迟关单与库存回补自动化测试
+- 增加接口测试覆盖，而不只是定向 Consumer 测试
 - 增加布隆过滤器误判率和穿透拦截效果验证
 - 补充压测，关注吞吐、响应时间、数据库压力和缓存命中率变化
 
@@ -754,6 +927,12 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 
 - Kafka 下单 Consumer 消息委派与异常抛出测试
 - 缓存删除补偿 Consumer 重试与重试上限测试
+
+当前还缺少的主要是：
+
+- 更完整的接口测试
+- 自动化集成测试
+- 更成体系的压测方案
 
 ### 5. 服务部署待完善
 

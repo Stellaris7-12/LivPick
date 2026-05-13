@@ -3,7 +3,7 @@ package com.livepick.mq.delay;
 import cn.hutool.json.JSONUtil;
 import com.livepick.config.LivPickProperties;
 import com.livepick.mq.message.OrderTimeoutMessage;
-import com.livepick.service.IVoucherOrderService;
+import com.livepick.service.IOrderTimeoutService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBlockingDeque;
@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 public class OrderTimeoutDelayQueueManager {
 
     private final RedissonClient redissonClient;
-    private final IVoucherOrderService voucherOrderService;
+    private final IOrderTimeoutService orderTimeoutService;
     private final LivPickProperties livPickProperties;
 
     private final ExecutorService consumerExecutor = Executors.newSingleThreadExecutor();
@@ -51,7 +51,7 @@ public class OrderTimeoutDelayQueueManager {
             try {
                 String messageJson = blockingDeque.take();
                 OrderTimeoutMessage message = JSONUtil.toBean(messageJson, OrderTimeoutMessage.class);
-                voucherOrderService.closeTimeoutOrder(message.getOrderId());
+                orderTimeoutService.closeTimeoutOrder(message.getOrderId());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {

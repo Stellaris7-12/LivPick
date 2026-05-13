@@ -156,32 +156,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public boolean closeTimeoutOrder(Long orderId) {
-        VoucherOrder order = getById(orderId);
-        if (order == null) {
-            return false;
-        }
-
-        boolean closed = update()
-                .eq("id", orderId)
-                .eq("status", OrderStatusConstants.UNPAID)
-                .set("status", OrderStatusConstants.CANCELLED)
-                .set("update_time", LocalDateTime.now())
-                .update();
-        if (!closed) {
-            return false;
-        }
-
-        seckillVoucherService.update()
-                .setSql("stock = stock + 1")
-                .eq("voucher_id", order.getVoucherId())
-                .update();
-        restoreRedisReservation(order.getVoucherId(), order.getUserId());
-        return true;
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
     public boolean payOrder(Long orderId) {
         return update()
                 .eq("id", orderId)
@@ -190,23 +164,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .set("pay_time", LocalDateTime.now())
                 .set("update_time", LocalDateTime.now())
                 .update();
-    }
-
-    @Override
-    public void scanAndCloseTimeoutOrders() {
-        LocalDateTime expireBefore = LocalDateTime.now().minusMinutes(livPickProperties.getOrder().getTimeoutMinutes());
-        List<VoucherOrder> timeoutOrders = query()
-                .eq("status", OrderStatusConstants.UNPAID)
-                .lt("create_time", expireBefore)
-                .last("LIMIT 100")
-                .list();
-        timeoutOrders.forEach(order -> {
-            try {
-                closeTimeoutOrder(order.getId());
-            } catch (Exception e) {
-                log.error("close timeout order failed, orderId={}", order.getId(), e);
-            }
-        });
     }
 
     private void rollbackSeckillReservation(Long voucherId, Long userId) {

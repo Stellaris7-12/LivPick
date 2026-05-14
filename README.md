@@ -567,19 +567,34 @@ docker exec -it livpick-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server 
 
 ## 测试方案
 
+当前测试只围绕**简历中的核心链路**展开，不追求全模块覆盖。
+
+本轮重点验证：
+
+- 店铺详情查询
+- 店铺券列表查询
+- 秒杀下单入口
+- 支付状态流转
+- Kafka 异步下单真实闭环
+- Redisson 延迟关单真实闭环
+
+本轮不纳入重点：
+
+- 登录、博客、关注、签到等旧模块
+- 普通券购买流程
+
+需要特别说明：
+
+- 当前前端“抢购”能力只接入了**秒杀券**
+- 普通券仍会展示，但购买流程暂未实现
+
 建议按下面顺序推进测试，不要一上来就直接做集成联调或压测：
 
-1. 单元测试
-2. 接口测试
-3. 集成测试 / 业务闭环验证
-4. 压测
+1. 单元测试：验证单个类或单个组件，启动快，定位最准
+2. 接口测试：验证 HTTP 接口的输入、输出和基本状态流转
+3. 集成测试：验证 MySQL、Redis、Kafka、Redisson 等真实中间件链路是否打通
+4. 压测：验证高并发下的吞吐、延迟和系统稳定性
 
-这样安排的原因是：
-
-- 单元测试最快，先验证局部逻辑是否正确
-- 接口测试先确认 API 行为和主流程是否符合预期
-- 集成测试成本最高，放在最后做完整链路验证
-- 压测依赖中间件、数据库和数据准备，应该建立在前面三层基本稳定之后
 
 ## 业务闭环验证
 
@@ -611,6 +626,39 @@ mvn "-Dmaven.repo.local=C:\Users\heyunhui\.m2\repository" "-Dtest=com.livepick.m
 - `CacheDeleteRetryConsumerTest` 能验证删缓存失败后的重试和重试上限逻辑
 
 ### 2. 接口测试
+
+如果你当前只想验证**简历中的核心链路**，这一节优先按下面这套执行，不需要把登录、博客、关注、签到等旧模块一起拉进来。
+
+推荐优先跑 `Spring Boot` 自动化接口测试：
+
+- `src/test/java/com/livepick/ShopApiIntegrationTest.java`
+- `src/test/java/com/livepick/VoucherApiIntegrationTest.java`
+- `src/test/java/com/livepick/VoucherOrderApiIntegrationTest.java`
+
+这三类测试只覆盖当前核心接口：
+
+- `GET /shop/{id}`
+- `GET /voucher/list/{shopId}`
+- `POST /voucher-order/seckill/{id}`
+- `POST /voucher-order/pay/{id}`
+
+它们的定位是：
+
+- 用 `@SpringBootTest + MockMvc` 做开发阶段快速回归
+- 依赖真实 MySQL、真实 Redis
+- 不依赖真实 Kafka
+- 通过 `@MockBean LivPickKafkaProducer` 验证秒杀接口是否正确触发消息发送
+
+推荐执行：
+
+```powershell
+mvn "-Dmaven.repo.local=C:\Users\heyunhui\.m2\repository" "-Dtest=com.livepick.ShopApiIntegrationTest,com.livepick.VoucherApiIntegrationTest,com.livepick.VoucherOrderApiIntegrationTest" test
+```
+
+注意：
+
+- 运行这些测试前，IDEA 中也要配置 `DB_*` 和 `REDIS_*` 环境变量
+- 普通券购买流程当前未接入，因此不纳入本轮自动化接口测试
 
 接口测试的目标是：**在项目已经启动的前提下，先验证 API 行为是否正确，再进入更重的集成联调**。
 
@@ -656,6 +704,29 @@ mvn "-Dmaven.repo.local=C:\Users\heyunhui\.m2\repository" "-Dtest=com.livepick.m
 不要求在这一层就把 Redis / Kafka / MySQL 每个细节全部查完。
 
 ### 3. 集成测试 / 业务闭环验证
+
+如果你当前只想验证**核心链路是否真的打通**，这一节建议只按下面顺序走，不必把所有旧模块一起联调：
+
+1. 预热秒杀库存
+2. 预热店铺 GEO
+3. 用 Postman 验证店铺详情接口
+4. 用 Postman 验证券列表接口
+5. 用 Postman 验证秒杀下单接口
+6. 观察 Kafka 是否收到下单消息、Consumer 是否异步落库
+7. 验证支付接口或等待超时关单
+
+推荐的最小 Postman 验证接口：
+
+- `GET /shop/1`
+- `GET /voucher/list/1`
+- `POST /voucher-order/seckill/{voucherId}`
+- `POST /voucher-order/pay/{orderId}`
+
+补充说明：
+
+- 前端页面里的“抢购”当前只针对**秒杀券**
+- 普通券虽然展示，但购买流程暂未实现
+- 如果通过前端页面验证秒杀按钮，要注意秒杀券的 `beginTime / endTime` 必须覆盖当前时间；历史示例数据可能已经过期
 
 这一层才是真正的完整链路联调。  
 建议按下面顺序验证，不要一上来就压测。
@@ -739,14 +810,62 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 - `seckill:stock:1` 有初始库存
 - `seckill:order:1` 不残留历史下单用户集合
 
-#### 3.2 验证店铺查询缓存链路
+#### 3.2 预热店铺 GEO 数据
+
+商家列表页默认会携带经纬度参数请求 `/shop/of/type`，后端会优先走 Redis GEO 查询，而不是直接查 MySQL。  
+如果 Redis 中没有预热 `shop:geo:{typeId}`，首页可以正常显示，但商家列表页会返回空列表。
+
+当前项目里已经有现成的 GEO 预热测试方法：
+
+- `src/test/java/com/livepick/LivPickApplicationTests.java`
+- 方法名：`loadShopData()`
+
+这个方法会：
+
+1. 从 MySQL 查询 `tb_shop`
+2. 按 `typeId` 分组
+3. 将店铺坐标批量写入 Redis：
+   - key：`shop:geo:{typeId}`
+   - member：`shopId`
+   - 坐标：`x, y`
+
+建议在 IDEA 中直接运行这个测试方法完成预热。
+
+需要注意：
+
+- 这个测试类会连接真实的 MySQL 和 Redis
+- 因此它和 Spring Boot 主程序一样，也依赖 IDEA Run Configuration 中的环境变量
+- 至少需要保证下面这些变量已经正确配置：
+  - `DB_HOST`
+  - `DB_PORT`
+  - `DB_USERNAME`
+  - `DB_PASSWORD`
+  - `REDIS_HOST`
+  - `REDIS_PORT`
+  - `REDIS_PASSWORD`
+
+如果这些环境变量没有配置好，测试方法虽然能在 IDEA 中启动，但会因为无法连接 MySQL 或 Redis 而失败。
+
+预热完成后，可以用下面的命令检查 Redis 中是否已经存在 GEO 索引：
+
+```powershell
+docker exec -it livpick-redis redis-cli KEYS shop:geo:*
+```
+
+如果想进一步确认某个分类下是否真的写入了店铺 member，例如 `typeId=1`：
+
+```powershell
+docker exec -it livpick-redis redis-cli ZRANGE shop:geo:1 0 -1
+```
+
+#### 3.3 验证店铺查询缓存链路
 
 - 启动 MySQL、Redis、Kafka、项目
 - 调用店铺查询接口
 - 观察 Redis 是否写入 `cache:shop:{id}`
 - 验证布隆过滤器和缓存空值是否生效
 
-#### 3.3 验证秒杀下单链路
+#### 3.4 验证秒杀下单链路
 
 - 调用秒杀接口
 - 观察 Redis 库存是否减少
@@ -754,7 +873,7 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
 - 观察 Kafka 是否收到下单消息
 - 验证 MySQL 是否成功创建订单
 
-#### 3.4 验证超时关单链路
+#### 3.5 验证超时关单链路
 
 - 下单成功后不支付
 - 等待超过 `15` 分钟，或临时将配置缩短后联调
@@ -763,7 +882,7 @@ docker exec -it livpick-redis redis-cli DEL seckill:order:1
   - MySQL 库存是否回补
   - Redis 库存和用户资格集合是否回补
 
-#### 3.5 验证缓存删除补偿链路
+#### 3.6 验证缓存删除补偿链路
 
 - 调用店铺更新接口
 - 模拟删缓存失败

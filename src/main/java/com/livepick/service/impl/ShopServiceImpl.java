@@ -52,7 +52,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Override
     public Result queryById(Long id) {
         Shop shop = cacheClient
-                .queryWithBloomPassThrough(
+                .queryWithBloomPassThrough( // 布隆过滤器 + 缓存空值 解决缓存穿透问题
                         CACHE_SHOP_KEY, id, shopBloomFilterService::mightContain, Shop.class,
                         this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES
                 );

@@ -11,6 +11,8 @@ import com.livepick.mq.message.SeckillOrderMessage;
 import com.livepick.mq.producer.LivPickKafkaProducer;
 import com.livepick.service.ISeckillVoucherService;
 import com.livepick.service.IVoucherOrderService;
+import com.livepick.service.SeckillPendingSendService;
+import com.livepick.service.SeckillReservationService;
 import com.livepick.utils.OrderStatusConstants;
 import com.livepick.utils.RedisIdWorker;
 import com.livepick.utils.UserHolder;
@@ -28,11 +30,8 @@ import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
-import java.util.List;
 
 import static com.livepick.utils.RedisConstants.LOCK_ORDER_KEY;
-import static com.livepick.utils.RedisConstants.SECKILL_ORDER_KEY;
-import static com.livepick.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 @Slf4j
 @Service
@@ -40,16 +39,11 @@ import static com.livepick.utils.RedisConstants.SECKILL_STOCK_KEY;
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
-    private static final DefaultRedisScript<Long> SECKILL_ROLLBACK_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
         SECKILL_SCRIPT.setResultType(Long.class);
-
-        SECKILL_ROLLBACK_SCRIPT = new DefaultRedisScript<>();
-        SECKILL_ROLLBACK_SCRIPT.setLocation(new ClassPathResource("seckill_rollback.lua"));
-        SECKILL_ROLLBACK_SCRIPT.setResultType(Long.class);
     }
 
     private final ISeckillVoucherService seckillVoucherService;
@@ -59,6 +53,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private final LivPickKafkaProducer livPickKafkaProducer;
     private final OrderTimeoutDelayQueueManager orderTimeoutDelayQueueManager;
     private final LivPickProperties livPickProperties;
+    private final SeckillReservationService seckillReservationService;
+    private final SeckillPendingSendService seckillPendingSendService;
 
     @Override
     public Result seckillVoucher(Long voucherId) {
@@ -79,12 +75,20 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         message.setUserId(userId);
         message.setVoucherId(voucherId);
         message.setCreateTime(LocalDateTime.now());
+
+        try {
+            seckillPendingSendService.register(message);
+        } catch (Exception e) {
+            seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
+            log.error("register pending seckill message failed, orderId={}", orderId, e);
+            return Result.fail("下单繁忙，请稍后重试");
+        }
+
         try {
             livPickKafkaProducer.sendSeckillOrder(message);
+            seckillPendingSendService.clear(orderId);
         } catch (Exception e) {
-            rollbackSeckillReservation(voucherId, userId);
-            log.error("send seckill order kafka message failed, orderId={}", orderId, e);
-            return Result.fail("下单繁忙，请稍后重试");
+            log.warn("send seckill order kafka message failed, will retry asynchronously, orderId={}", orderId, e);
         }
         return Result.ok(orderId);
     }
@@ -116,7 +120,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     .gt("stock", 0)
                     .update();
             if (!stockUpdated) {
-                restoreRedisReservation(voucherId, userId);
+                seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
                 log.warn("db stock insufficient after kafka consume, orderId={}, userId={}, voucherId={}, failureStage=deductDbStock",
                         message.getOrderId(), userId, voucherId);
                 return;
@@ -133,7 +137,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             try {
                 boolean saved = save(voucherOrder);
                 if (!saved) {
-                    restoreRedisReservation(voucherId, userId);
+                    seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
                     throw new IllegalStateException("save voucher order failed");
                 }
             } catch (DuplicateKeyException duplicateKeyException) {
@@ -148,7 +152,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             timeoutMessage.setUserId(voucherOrder.getUserId());
             timeoutMessage.setVoucherId(voucherOrder.getVoucherId());
             timeoutMessage.setExpireAt(voucherOrder.getCreateTime().plusMinutes(livPickProperties.getOrder().getTimeoutMinutes()));
-            orderTimeoutDelayQueueManager.offer(timeoutMessage);
+            try {
+                orderTimeoutDelayQueueManager.offer(timeoutMessage);
+            } catch (Exception e) {
+                log.error("offer timeout order message failed, fallback scan will handle it, orderId={}", voucherOrder.getId(), e);
+            }
         } finally {
             redisLock.unlock();
         }
@@ -164,18 +172,5 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .set("pay_time", LocalDateTime.now())
                 .set("update_time", LocalDateTime.now())
                 .update();
-    }
-
-    private void rollbackSeckillReservation(Long voucherId, Long userId) {
-        stringRedisTemplate.execute(
-                SECKILL_ROLLBACK_SCRIPT,
-                Collections.emptyList(),
-                voucherId.toString(), userId.toString()
-        );
-    }
-
-    private void restoreRedisReservation(Long voucherId, Long userId) {
-        stringRedisTemplate.opsForValue().increment(SECKILL_STOCK_KEY + voucherId);
-        stringRedisTemplate.opsForSet().remove(SECKILL_ORDER_KEY + voucherId, userId.toString());
     }
 }

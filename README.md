@@ -100,10 +100,10 @@ src/main/java/com/livepick
    - 判断是否重复下单
    - 扣减 Redis 库存
    - 记录用户下单资格
-5. Lua 成功后构造 `SeckillOrderMessage` 并发送 Kafka
+5. Lua 成功后先写入 Redis 待发送登记，再尝试发送 `SeckillOrderMessage` 到 Kafka
 6. Kafka Consumer 异步消费消息，执行：
    - Redisson 按 `userId` 加锁
-   - 查询数据库是否已有订单
+   - 查询数据库是否已有历史订单
    - 扣减数据库库存
    - 创建订单
 7. 下单成功后投递延迟关单消息
@@ -113,12 +113,14 @@ src/main/java/com/livepick
 - Redis + Lua 先把大部分无效请求挡在数据库外
 - Kafka 把瞬时高并发流量削峰成平滑消费流量
 - MySQL 只承担最终落库，不再承担所有前置资格判断
+- Redis 待发送登记补上了“Kafka 发送异常但结果不确定”的补偿入口，避免误回滚抢购资格
 
 幂等与兜底：
 
 - Redis Lua 入口做第一层一人一单保护
 - Consumer 端按 `userId` 加 Redisson 分布式锁
 - `tb_voucher_order(voucher_id, user_id)` 唯一索引做数据库最终兜底
+- 当前业务语义已明确为：**同一用户同一张秒杀券只允许成功抢购一次；超时取消只释放库存，不恢复购买资格**
 
 ### 2. 超时关单链路
 
@@ -135,13 +137,14 @@ src/main/java/com/livepick
 4. 后台消费线程取出消息，调用独立的超时处理服务执行 `closeTimeoutOrder(orderId)`
 5. 仅当订单仍为 `UNPAID` 时，才更新为 `CANCELLED`
 6. 回补 MySQL 秒杀库存
-7. 回补 Redis 库存并移除用户资格集合
+7. 回补 Redis 库存，但不移除用户资格集合
 
 兜底机制：
 
 - `RDelayedQueue` 负责主链路的准实时关单
 - `SpringTask` 每 60 秒扫描一次超时未支付订单，负责扫漏
 - 当前已将“超时消息投递”和“超时关单处理”拆分为不同组件，避免订单主服务与延迟队列之间形成循环依赖
+- 延迟队列的投递时间已按 `expireAt` 计算，避免 Kafka 消费积压导致关单整体后移
 
 当前默认配置：
 
@@ -159,14 +162,16 @@ src/main/java/com/livepick
 1. 先更新数据库
 2. 再删除缓存
 3. 如果删缓存失败，发送 `CacheDeleteRetryMessage`
-4. Kafka Consumer 继续重试删缓存
-5. 超过最大重试次数后记录错误日志
+4. Kafka Consumer 首次消费失败后，将消息转入 Redis 延迟调度
+5. 后台任务按退避时间继续删缓存
+6. 超过最大重试次数后记录错误日志
 
 为什么当前这样设计：
 
 - 比延迟双删更直接
 - 比 canal 成本更低
 - 与当前项目已有 Kafka 技术栈更契合
+- 首次失败仍保留 Kafka 解耦能力，后续重试则避免“瞬间打完所有重试次数”
 
 ## Redis / Redisson / Kafka 在项目中的角色
 
@@ -908,76 +913,71 @@ docker exec -it livpick-redis redis-cli ZRANGE shop:geo:1 0 -1
 
 ## 当前进度与后续迭代
 
-### 1. 本轮优化目标
+### 1. 当前已完成内容
 
-本轮优化的目标是先把简历中新增的核心能力补进当前项目分支，形成可编译、可继续扩展的代码骨架，重点覆盖以下 4 个方向：
-
-1. Kafka 替换 Redis Stream，实现秒杀异步落库
-2. Kafka 实现缓存删除补偿重试
-3. Redisson 延迟队列实现超时关单与库存回流骨架
-4. Redisson Bloom Filter + 缓存空值实现缓存穿透防护骨架
-
-### 2. 当前已完成内容
-
-#### 2.1 Kafka 异步落库
+#### 1.1 Kafka 异步秒杀主链路
 
 已完成：
 
-- `seckill.lua` 已由“校验 + Redis Stream 入队”改为“只做库存校验、一人一单校验和 Redis 预扣减”
-- `VoucherOrderServiceImpl.seckillVoucher()` 已改为 Lua 成功后发送 Kafka 下单消息
+- `seckill.lua` 已收敛为“库存校验 + 一人一单校验 + Redis 预扣减”
+- `VoucherOrderServiceImpl.seckillVoucher()` 已改为 Lua 成功后先写 Redis 待发送登记，再尝试发送 Kafka 下单消息
 - 已新增 `SeckillOrderMessage`、Kafka Producer、Kafka Consumer
 - Kafka Consumer 已实现异步消费、查重、数据库扣库存、订单创建
-- 消费端已保留 Redisson 分布式锁，避免重复消费导致重复下单
-- Kafka 发送失败时，已通过 `seckill_rollback.lua` 回滚 Redis 资格占用
-- 已补充支付入口和基于订单状态条件更新的支付成功逻辑
-- 已补充消费异常日志和重复消费分支处理
+- 消费端保留 Redisson 分布式锁，减少重复消费并发冲突
+- Kafka 发送异常时，不再立即回滚资格，而是交给后台补发任务继续发送
+- Redis 待发送补发达到上限后，会回滚“库存 + 资格”，避免长时间悬挂
+- 当前业务语义已明确为：**同一用户同一张秒杀券只允许成功抢购一次；超时取消只释放库存，不恢复资格**
+- 秒杀接口当前返回 `orderId`，语义是“请求已受理并进入异步下单流程”，不是“此刻已完成落库”
 
 核心文件：
 
 - [VoucherOrderServiceImpl](src/main/java/com/livepick/service/impl/VoucherOrderServiceImpl.java)
 - [LivPickKafkaProducer](src/main/java/com/livepick/mq/producer/LivPickKafkaProducer.java)
 - [SeckillOrderConsumer](src/main/java/com/livepick/mq/consumer/SeckillOrderConsumer.java)
-- [VoucherOrderController](src/main/java/com/livepick/controller/VoucherOrderController.java)
+- [SeckillPendingSendService](src/main/java/com/livepick/service/SeckillPendingSendService.java)
+- [SeckillPendingRetryTask](src/main/java/com/livepick/task/SeckillPendingRetryTask.java)
 - [seckill.lua](src/main/resources/seckill.lua)
 - [seckill_rollback.lua](src/main/resources/seckill_rollback.lua)
 
-#### 2.2 缓存删除补偿重试
+#### 1.2 缓存删除补偿重试
 
 已完成：
 
 - 店铺更新流程已改为“更新数据库后删除缓存”
-- 删除缓存失败时，已发送 Kafka 补偿消息
-- 已新增 `CacheDeleteRetryMessage`
-- 已新增 Kafka Consumer 执行删缓存重试
-- 已支持最大重试次数控制和失败日志输出
+- 删除缓存失败时，仍先发送 Kafka 补偿消息
+- Kafka Consumer 首次消费失败后，已改为写入 Redis 延迟调度，而不是立即重发 Kafka
+- 已新增退避重试调度服务与后台任务
+- 已支持最大重试次数控制和最终失败日志输出
 
 核心文件：
 
 - [ShopServiceImpl](src/main/java/com/livepick/service/impl/ShopServiceImpl.java)
 - [CacheDeleteRetryConsumer](src/main/java/com/livepick/mq/consumer/CacheDeleteRetryConsumer.java)
-- [CacheClient](src/main/java/com/livepick/utils/CacheClient.java)
+- [CacheDeleteRetryScheduleService](src/main/java/com/livepick/service/CacheDeleteRetryScheduleService.java)
+- [CacheDeleteRetryTask](src/main/java/com/livepick/task/CacheDeleteRetryTask.java)
 
-#### 2.3 Redisson 延迟队列超时关单
+#### 1.3 Redisson 延迟队列超时关单
 
 已完成：
 
 - 订单创建成功后已投递 Redisson 延迟队列消息
 - 已新增 `OrderTimeoutMessage`
-- 延迟队列消费者已实现到期关单
+- 延迟队列消费者已按 `expireAt` 计算剩余延迟时间，不再固定从“入队时刻”重新计时
 - 关单逻辑已使用订单状态条件更新，避免支付与关单并发冲突
-- 关单成功后已回补数据库库存和 Redis 秒杀资格
-- 已新增定时扫描任务作为兜底
-- 已补充支付成功与超时关单的最小闭环，支持演示状态竞争场景
-- 已将超时关单处理从订单主服务中拆出，解决应用启动时的 Bean 循环依赖问题
+- 关单成功后已回补数据库库存
+- Redis 库存回补已改为 Lua 原子操作；超时取消只回补库存，不恢复用户资格
+- 已新增定时扫描任务作为兜底，并改为分批循环处理，减少堆积场景下的漏扫问题
+- 已将超时关单处理从订单主服务中拆出，避免 Bean 循环依赖
 
 核心文件：
 
 - [OrderTimeoutDelayQueueManager](src/main/java/com/livepick/mq/delay/OrderTimeoutDelayQueueManager.java)
 - [OrderTimeoutFallbackTask](src/main/java/com/livepick/task/OrderTimeoutFallbackTask.java)
 - [OrderTimeoutServiceImpl](src/main/java/com/livepick/service/impl/OrderTimeoutServiceImpl.java)
-- [VoucherOrderServiceImpl](src/main/java/com/livepick/service/impl/VoucherOrderServiceImpl.java)
+- [SeckillReservationService](src/main/java/com/livepick/service/SeckillReservationService.java)
+- [seckill_stock_rollback.lua](src/main/resources/seckill_stock_rollback.lua)
 
-#### 2.4 Redisson Bloom Filter + 缓存空值
+#### 1.4 Redisson Bloom Filter + 缓存空值
 
 已完成：
 
@@ -986,74 +986,71 @@ docker exec -it livpick-redis redis-cli ZRANGE shop:geo:1 0 -1
 - 缓存工具类已新增布隆过滤器版查询方法
 - 启动时若过滤器为空，会尝试从数据库装载店铺 ID
 
-核心文件：
-
-- [ShopBloomFilterService](src/main/java/com/livepick/service/ShopBloomFilterService.java)
-- [CacheClient](src/main/java/com/livepick/utils/CacheClient.java)
-- [ShopServiceImpl](src/main/java/com/livepick/service/impl/ShopServiceImpl.java)
-
-#### 2.5 基础配置与可编译状态
+#### 1.5 支付与状态流转
 
 已完成：
 
-- 新增 Kafka 依赖和 Topic 配置
-- 新增 `LivPickProperties` 统一管理 Kafka、延迟队列、缓存重试、布隆过滤器配置
+- 已提供 `POST /voucher-order/pay/{id}` 本地状态流转接口
+- 支付成功逻辑使用订单状态条件更新，只允许 `UNPAID -> PAID`
+- 超时关单链路会自动跳过已支付订单
+
+说明：
+
+- 当前还没有接入真实支付网关或支付回调
+- 当前支付接口主要用于本地联调和演示“支付/关单竞争”场景
+
+#### 1.6 基础配置与可编译状态
+
+已完成：
+
+- 已新增 Kafka 依赖和 Topic 配置
+- 已新增 `LivPickProperties` 统一管理 Kafka、秒杀补发、延迟关单、缓存重试、布隆过滤器配置
 - `RedissonConfig` 已改为从 `application.yaml` 读取 Redis 配置
 - Lombok 已升级到兼容当前 JDK 的版本
 - `tb_voucher_order` 已补充 `(voucher_id, user_id)` 唯一索引脚本，作为一人一单数据库兜底
 - 当前分支已执行 `mvn compile` 并通过
-- 已新增 Kafka Consumer 与缓存补偿 Consumer 的定向单元测试并通过
+- 已执行 `SeckillOrderConsumerTest`、`CacheDeleteRetryConsumerTest` 并通过
 
-### 3. 后续代码待完善内容
+### 2. 后续代码待完善内容
 
-#### 3.1 Kafka 秒杀链路
+#### 2.1 Kafka 秒杀链路
 
-- 补充更完整的消息发送补偿机制，例如本地消息表、Outbox 或 Redis 待发送标记
 - 增加 Kafka 消费失败重试、死信队列和消息追踪能力
-- 完善消费者幂等处理，避免极端情况下重复消费带来的边界问题
-- 评估是否需要把“重复键冲突”与“真实系统异常”进一步拆分成更细的监控指标
+- 在 Redis 待发送补偿基础上，继续评估是否需要升级为本地消息表或 Outbox
+- 细化秒杀链路监控指标，区分“重复消息 / 重复订单 / 真实发送失败 / 最终补偿回滚”
+- 增加针对多实例部署的补发去重与调度协调能力
 
-#### 3.2 缓存删除补偿链路
+#### 2.2 缓存删除补偿链路
 
-- 增加延迟重试、指数退避和死信队列
-- 将当前店铺缓存补偿抽象为通用补偿组件，覆盖更多业务缓存
 - 增加告警机制，而不只是输出错误日志
-- 进一步细化消息体字段，例如重试时间、来源模块、失败原因
+- 将当前店铺缓存补偿抽象为通用补偿组件，覆盖更多业务缓存
+- 进一步细化消息体字段，例如来源模块、失败原因分类、人工排查标识
+- 评估是否需要引入死信队列或人工回放入口
 
-#### 3.3 延迟关单链路
+#### 2.3 延迟关单与支付链路
 
 - 对接真实支付成功链路
-- 增加支付成功后取消延迟消息或消费端跳过已支付订单的完整逻辑
+- 增加支付成功后取消延迟消息或更细粒度的支付回调处理
 - 进一步细化多实例部署下的并发消费和幂等控制
-- 把库存回补逻辑整理为更统一的补偿方法
+- 补充“创建订单成功但延迟消息投递失败”场景的观测与告警能力
 
-#### 3.4 Bloom Filter 链路
+#### 2.4 Bloom Filter 链路
 
 - 增加新增店铺、删除店铺时的增量同步维护逻辑
 - 增加手动重建入口和定时重建任务
 - 基于真实数据量重新评估 `expectedInsertions` 和误判率参数
 - 将布隆过滤器方案扩展到更多热点查询场景
 
-### 4. 测试与验证待完善
+### 3. 测试与验证待完善
 
 - 增加 Kafka 秒杀下单主链路自动化集成测试
+- 增加“发送失败 -> 补发成功 / 补发耗尽”的自动化验证
 - 增加延迟关单与库存回补自动化测试
 - 增加接口测试覆盖，而不只是定向 Consumer 测试
 - 增加布隆过滤器误判率和穿透拦截效果验证
 - 补充压测，关注吞吐、响应时间、数据库压力和缓存命中率变化
 
-当前已完成的定向测试：
-
-- Kafka 下单 Consumer 消息委派与异常抛出测试
-- 缓存删除补偿 Consumer 重试与重试上限测试
-
-当前还缺少的主要是：
-
-- 更完整的接口测试
-- 自动化集成测试
-- 更成体系的压测方案
-
-### 5. 服务部署待完善
+### 4. 服务部署待完善
 
 如果要把当前能力完整联调或演示，还需要补齐以下环境和文档：
 
@@ -1063,21 +1060,14 @@ docker exec -it livpick-redis redis-cli ZRANGE shop:geo:1 0 -1
 - Docker Compose 或部署文档
 - 本地联调说明，包括 Kafka、Redis、MySQL 的启动顺序和配置项说明
 
-建议补充的部署类内容：
-
-- `KAFKA_BOOTSTRAP_SERVERS` 配置说明
-- `REDIS_HOST` / `REDIS_PASSWORD` 配置说明
-- `DB_HOST` / `DB_USERNAME` / `DB_PASSWORD` 配置说明
-- Topic 创建、消费者组校验和本地联调脚本
-
-### 6. 建议的下一步开发顺序
+### 5. 建议的下一步开发顺序
 
 建议按下面顺序继续完善：
 
-1. 先补 Kafka 幂等补偿和消费失败治理，稳住秒杀主链路
-2. 再补支付回调和超时关单闭环增强
-3. 再补缓存补偿重试增强版
-4. 最后补布隆过滤器增量维护、压测和部署文档
+1. 先补 Kafka 消费失败治理、死信队列和消息追踪，继续稳住秒杀主链路
+2. 再补真实支付回调与关单闭环增强
+3. 再补缓存补偿通用化、告警和回放能力
+4. 最后补 Bloom Filter 增量维护、压测和部署文档
 
 ## 当前限制与扩展方向
 

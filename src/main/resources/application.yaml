@@ -40,12 +40,24 @@ livpick:
     cache-delete-retry-topic: cache-shop-delete-retry
     partitions: 1
     replicas: 1
+  seckill:
+    pending-send-scan-interval-ms: 5000
+    pending-send-retry-delay-ms: 5000
+    pending-send-ttl-minutes: 20
+    pending-send-max-attempts: 3
+    pending-send-batch-size: 20
   order:
     timeout-minutes: 15
     timeout-scan-interval-ms: 60000
+    timeout-scan-batch-size: 100
     delay-queue-name: order:timeout:queue
   cache:
     delete-retry-max-attempts: 3
+    delete-retry-initial-delay-ms: 5000
+    delete-retry-max-delay-ms: 60000
+    delete-retry-scan-interval-ms: 5000
+    delete-retry-message-ttl-minutes: 60
+    delete-retry-batch-size: 20
   bloom:
     shop-filter-name: bf:shop:id
     expected-insertions: 100000

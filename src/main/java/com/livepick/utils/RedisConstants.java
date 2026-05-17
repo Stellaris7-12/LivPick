@@ -21,4 +21,8 @@ public class RedisConstants {
     public static final String USER_SIGN_KEY = "sign:";
     public static final String SECKILL_ORDER_KEY = "seckill:order:";
     public static final String LOCK_ORDER_KEY = "lock:order:";
+    public static final String SECKILL_PENDING_SEND_KEY = "seckill:pending:send:";
+    public static final String SECKILL_PENDING_SEND_INDEX_KEY = "seckill:pending:send:index";
+    public static final String CACHE_DELETE_RETRY_KEY = "cache:delete:retry:";
+    public static final String CACHE_DELETE_RETRY_INDEX_KEY = "cache:delete:retry:index";
 }

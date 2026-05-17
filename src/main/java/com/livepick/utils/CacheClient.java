@@ -20,7 +20,7 @@ import static com.livepick.utils.RedisConstants.LOCK_SHOP_KEY;
 
 @Slf4j
 @Component
-public class CacheClient {
+public class CacheClient { // 缓存重建相关操作
 
     private final StringRedisTemplate stringRedisTemplate;
     // 创建固定大小线程池用于异步缓存重建

@@ -8,4 +8,6 @@ public class CacheDeleteRetryMessage {
     private String bizType;
     private Long bizId;
     private int retryCount;
+    private Long nextRetryAt;
+    private String lastError;
 }

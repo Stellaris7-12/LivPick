@@ -13,10 +13,16 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 订单超时延迟队列管理器
+ * 基于Redisson实现，用于将订单超时消息放入延迟队列，并异步消费处理
+ */
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -26,6 +32,7 @@ public class OrderTimeoutDelayQueueManager {
     private final IOrderTimeoutService orderTimeoutService;
     private final LivPickProperties livPickProperties;
 
+    // 单线程消费者线程池，保证消息顺序处理
     private final ExecutorService consumerExecutor = Executors.newSingleThreadExecutor();
 
     private RBlockingDeque<String> blockingDeque;
@@ -39,11 +46,8 @@ public class OrderTimeoutDelayQueueManager {
     }
 
     public void offer(OrderTimeoutMessage message) {
-        delayedQueue.offer(
-                JSONUtil.toJsonStr(message),
-                livPickProperties.getOrder().getTimeoutMinutes(),
-                TimeUnit.MINUTES
-        );
+        long delayMillis = Math.max(0L, Duration.between(LocalDateTime.now(), message.getExpireAt()).toMillis());
+        delayedQueue.offer(JSONUtil.toJsonStr(message), delayMillis, TimeUnit.MILLISECONDS);
     }
 
     private void consume() {
@@ -62,9 +66,6 @@ public class OrderTimeoutDelayQueueManager {
 
     @PreDestroy
     public void destroy() {
-        if (delayedQueue != null) {
-            delayedQueue.destroy();
-        }
         consumerExecutor.shutdownNow();
     }
 }

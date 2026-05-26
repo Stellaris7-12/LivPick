@@ -1,6 +1,7 @@
 package com.livepick;
 
 import lombok.extern.slf4j.Slf4j;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RLock;
@@ -11,6 +12,7 @@ import javax.annotation.Resource;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
+@Disabled("Requires Redis/Redisson")
 @SpringBootTest
 class RedissonTest {
 

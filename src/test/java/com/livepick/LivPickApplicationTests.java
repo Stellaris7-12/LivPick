@@ -4,6 +4,7 @@ import com.livepick.entity.Shop;
 import com.livepick.service.impl.ShopServiceImpl;
 import com.livepick.utils.CacheClient;
 import com.livepick.utils.RedisIdWorker;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.geo.Point;
@@ -24,6 +25,7 @@ import static com.livepick.utils.RedisConstants.CACHE_SHOP_KEY;
 import static com.livepick.utils.RedisConstants.SHOP_GEO_KEY;
 
 @SpringBootTest
+@Disabled("Requires Redis-backed integration environment")
 class LivPickApplicationTests {
 
     @Resource

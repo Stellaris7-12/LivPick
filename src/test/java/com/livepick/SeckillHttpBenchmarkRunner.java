@@ -24,22 +24,33 @@ public class SeckillHttpBenchmarkRunner {
 
     public static void main(String[] args) throws Exception {
         String baseUrl = System.getProperty("benchmark.baseUrl", "http://127.0.0.1:8081");
+        String scenario = System.getProperty("benchmark.scenario", "default");
         long voucherId = Long.getLong("benchmark.voucherId", 7L);
         int totalRequests = Integer.getInteger("benchmark.totalRequests", 500);
         int concurrency = Integer.getInteger("benchmark.concurrency", 100);
         long userIdStart = Long.getLong("benchmark.userIdStart", 1000L);
+        int uniqueUsers = Integer.getInteger("benchmark.uniqueUsers", totalRequests);
         int warmupRequests = Integer.getInteger("benchmark.warmupRequests", Math.min(50, totalRequests));
 
-        BenchmarkResult warmup = execute(baseUrl, voucherId, Math.max(warmupRequests, 1), Math.min(concurrency, Math.max(warmupRequests, 1)), userIdStart);
-        System.out.println("=== Warmup ===");
-        warmup.print();
+        System.out.println("scenario      = " + scenario);
+        System.out.println("voucherId     = " + voucherId);
+        System.out.println("totalRequests = " + totalRequests);
+        System.out.println("concurrency   = " + concurrency);
+        System.out.println("uniqueUsers   = " + uniqueUsers);
+        System.out.println("warmupRequests= " + warmupRequests);
 
-        BenchmarkResult result = execute(baseUrl, voucherId, totalRequests, concurrency, userIdStart + warmupRequests + 1L);
+        if (warmupRequests > 0) {
+            BenchmarkResult warmup = execute(baseUrl, voucherId, warmupRequests, Math.min(concurrency, warmupRequests), userIdStart, warmupRequests);
+            System.out.println("=== Warmup ===");
+            warmup.print();
+        }
+
+        BenchmarkResult result = execute(baseUrl, voucherId, totalRequests, concurrency, userIdStart + warmupRequests + 1L, uniqueUsers);
         System.out.println("=== Formal Run ===");
         result.print();
     }
 
-    private static BenchmarkResult execute(String baseUrl, long voucherId, int totalRequests, int concurrency, long userIdStart)
+    private static BenchmarkResult execute(String baseUrl, long voucherId, int totalRequests, int concurrency, long userIdStart, int uniqueUsers)
             throws InterruptedException, ExecutionException {
         ExecutorService executorService = Executors.newFixedThreadPool(concurrency);
         HttpClient httpClient = HttpClient.newBuilder()
@@ -49,7 +60,7 @@ public class SeckillHttpBenchmarkRunner {
         List<Future<RequestMetric>> futures = new ArrayList<>(totalRequests);
         long startNs = System.nanoTime();
         for (int i = 0; i < totalRequests; i++) {
-            long userId = userIdStart + i;
+            long userId = userIdStart + (i % Math.max(uniqueUsers, 1));
             futures.add(executorService.submit(new RequestTask(httpClient, baseUrl, voucherId, userId)));
         }
 

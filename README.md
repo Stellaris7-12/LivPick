@@ -669,37 +669,159 @@ mvn "-Dmaven.repo.local=C:\Users\heyunhui\.m2\repository" "-Dtest=com.livepick.S
 
 建议至少覆盖下面几类接口：
 
+Postman 调试默认基准地址：
+
+```text
+http://localhost:8081
+```
+
+其中：
+
+- `2.1`、`2.4` 不需要登录
+- `2.2`、`2.3` 需要先拿到登录 token，并放到请求头 `authorization`
+
+如果你要先在 Postman 里拿 token，可以按下面顺序：
+
+1. 发送验证码
+
+```http
+POST http://localhost:8081/user/code?phone=13800138000
+```
+
+2. 查看应用日志里打印的验证码
+
+- `UserServiceImpl.sendCode()` 会在 debug 日志里输出 6 位验证码
+
+3. 登录获取 token
+
+```http
+POST http://localhost:8081/user/login
+Content-Type: application/json
+
+{
+  "phone": "13800138000",
+  "code": "日志里看到的6位验证码"
+}
+```
+
+4. 成功后把返回的 `data` 作为后续请求头：
+
+```text
+authorization: <token>
+```
+
 #### 2.1 店铺查询接口
 
-- 调用店铺详情查询接口
-- 预期：
-  - 存在的店铺返回成功
-  - 不存在的店铺返回“店铺不存在”
-- 可额外观察：
-  - Redis 是否写入 `cache:shop:{id}`
+推荐准备两个请求：
+
+1. 查询存在的店铺
+
+```http
+GET http://localhost:8081/shop/1
+```
+
+2. 查询不存在的店铺
+
+```http
+GET http://localhost:8081/shop/999999999
+```
+
+Postman 检查点：
+
+- 存在的店铺返回 `success=true`
+- `data.id`、`data.name` 等字段有值
+- 不存在的店铺返回 `success=false`
+- `errorMsg` 包含“店铺不存在”
+
+可额外观察：
+
+- Redis 是否写入 `cache:shop:1`
 
 #### 2.2 秒杀下单接口
 
-- 调用秒杀接口
-- 预期：
-  - 库存充足且未重复下单时返回成功和 `orderId`
-  - 库存不足时返回失败
-  - 同一用户重复下单时返回失败
+前置条件：
+
+- 先通过 `/user/login` 获取 token
+- 准备一个当前仍在有效时间内、且 Redis 已预热库存的秒杀券 `voucherId`
+
+推荐请求：
+
+```http
+POST http://localhost:8081/voucher-order/seckill/{voucherId}
+# Header中增加
+authorization: <token>
+```
+
+
+Postman 检查点：
+
+- 首次下单成功时返回 `success=true`
+- 返回体 `data` 是数字类型的 `orderId`
+- 同一用户重复请求同一 `voucherId` 时，返回 `success=false`
+- `errorMsg` 包含“不能重复下单”
+- 如果库存不足，则返回 `success=false`，`errorMsg` 包含“库存不足”
+
+可额外观察：
+
+- Redis 库存 key：`seckill:stock:{voucherId}`
+- Redis 资格集合：`seckill:order:{voucherId}`
+- Redis 待发送补偿索引：`seckill:pending:send:index`
 
 #### 2.3 支付接口
 
-- 对未支付订单调用支付接口
-- 预期：
-  - 首次支付成功
-  - 已支付或已取消订单再次支付时返回“订单状态已变化，支付失败”
+前置条件：
+
+- 先完成一次秒杀下单，拿到返回的 `orderId`
+- 使用和下单相同的登录 token
+
+推荐请求：
+
+```http
+POST http://localhost:8081/voucher-order/pay/{orderId} # {orderId}替换为订单Id
+authorization: <token> # Header中增加
+```
+
+
+Postman 检查点：
+
+- 对 `UNPAID` 订单首次支付时返回 `success=true`
+- 对已经支付的订单再次请求时返回 `success=false`
+- 对已经超时取消的订单请求支付时也返回 `success=false`
+- `errorMsg` 包含“订单状态已变化，支付失败”
+
+说明：
+
+- 当前支付接口只做本地订单状态流转，不对接第三方支付网关
+- 这一节的目的主要是验证 `UNPAID -> PAID` 的条件更新是否生效
 
 #### 2.4 店铺更新接口
 
-- 调用店铺更新接口
-- 预期：
-  - 数据库更新成功
-  - 正常情况下缓存被删除
-  - 异常情况下可继续观察补偿消息
+推荐请求：
+
+```http
+PUT http://localhost:8081/shop
+# 配置 Headers
+Content-Type: application/json  
+# 配置请求 Body (raw -> json)
+{
+  "id": 1,
+  "name": "102茶餐厅",
+  "address": "龙岗星河"
+}
+```
+
+Postman 检查点：
+
+- 返回 `success=true`
+- MySQL 中 `tb_shop.id=1` 对应记录已更新
+- Redis 中 `cache:shop:1` 被删除
+
+如果你想继续验证缓存补偿链路，可以按下面顺序观察：
+
+1. 先通过 `GET /shop/1` 让 `cache:shop:1` 回填到 Redis
+2. 再调用上面的 `PUT /shop`
+3. 正常情况下 `cache:shop:1` 会被直接删除
+4. 如果你刻意制造删缓存失败，再观察 Kafka topic `cache-shop-delete-retry` 和 Redis 延迟补偿 key
 
 这一层主要关注：
 

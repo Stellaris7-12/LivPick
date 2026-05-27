@@ -1,380 +1,320 @@
-# hm-dianping 项目分析
+# LivPick MySQL-only 秒杀分支说明
 
-## 1. 项目定位
+## 1. 分支目标
 
-这是一个基于 Spring Boot 的点评类后端项目，业务场景接近“大众点评”：
+当前分支聚焦于“只使用 MySQL 实现秒杀下单链路”。
 
-- 用户手机号验证码登录
-- 店铺信息查询与分类查询
-- 探店笔记发布、点赞、热门榜
-- 用户关注、共同关注
-- 优惠券与秒杀券
-- 高并发秒杀下单
+目标有两个：
 
-项目整体是单体应用，不是微服务架构。它采用典型的分层式设计：
+1. 提供一个不依赖 Redis 秒杀库存、Lua、消息队列的基线实现
+2. 作为后续 `MySQL + Redis`、`MySQL + Redis + Kafka` 方案的压测对照组
 
-`Controller -> Service -> Mapper -> MySQL`
+本分支没有尝试移除项目中所有 Redis 用途，而是只剥离了“秒杀下单主链路”对 Redis 的依赖。为了让压测不再受登录态 Redis 校验影响，额外提供了压测专用请求头方案。
 
-与此同时，Redis 在这个项目中不只是缓存，还承担了登录态、点赞、关注集合、GEO 附近搜索、签到、全局 ID 和秒杀异步队列等职责。
+## 2. 秒杀方案概览
 
-## 2. 技术栈
+秒杀入口保持不变：
 
-从 `pom.xml` 可以看出本项目的核心技术栈如下：
+- `POST /voucher-order/seckill/{voucherId}`
 
-- Spring Boot 2.3.12.RELEASE
-- Spring MVC
-- MyBatis-Plus 3.4.3
-- MySQL 5.x 驱动
-- Redis
-- Redisson
-- Hutool
-- Lombok
+当前实现位于：
 
-其中：
+- [VoucherOrderServiceImpl](src/main/java/com/livepick/service/impl/VoucherOrderServiceImpl.java)
 
-- Spring Boot 负责整体应用启动、依赖整合和 Web API 暴露
-- MyBatis-Plus 负责数据库访问与分页
-- Redis 负责高频读写场景和高并发控制
-- Redisson 负责分布式锁能力
+核心流程如下：
 
-## 3. 工程结构
+1. 校验秒杀券是否存在，以及开始/结束时间是否合法
+2. 查询当前用户是否已经下过该券
+3. 执行条件扣减库存
+4. 创建订单
+5. 若订单插入失败，则回滚整个事务
 
-项目的主代码位于 `src/main/java/com/hmdp`，按职责分层：
+## 3. 正确性保证
 
-- `controller`
-  - 对外提供 REST 接口
-- `service`
-  - 定义业务接口
-- `service/impl`
-  - 实现具体业务逻辑
-- `mapper`
-  - MyBatis-Plus / Mapper 层
-- `entity`
-  - 数据库实体对象
-- `dto`
-  - 接口传输对象和统一返回体
-- `config`
-  - MVC、MyBatis-Plus、Redisson、异常处理等配置
-- `utils`
-  - Redis 工具、拦截器、分布式锁、正则工具、用户上下文等
+### 3.1 一人一单
 
-资源文件位于 `src/main/resources`：
+“一人一单”由两层保证：
 
-- `application.yaml`
-  - 基础配置
-- `db/hmdp.sql`
-  - 初始化表结构和测试数据
-- `seckill.lua`
-  - 秒杀原子校验脚本
-- `unlock.lua`
-  - Redis 分布式锁解锁脚本
+1. 业务层预检查  
+   在下单前查询 `tb_voucher_order`，判断当前用户是否已经下过该券。
 
-## 4. 核心框架设计
+2. 数据库唯一约束兜底  
+   `tb_voucher_order` 上存在 `(voucher_id, user_id)` 唯一索引，最终以数据库约束作为并发场景下的硬保证。
 
-### 4.1 Web 层
+这意味着即使两个相同用户请求同时通过了前置查询，最终也只会有一个插入成功，另一个会在插入订单时失败。
 
-项目使用 Spring MVC 暴露接口，请求由各个 `Controller` 处理，例如：
+### 3.2 库存不超卖
 
-- `UserController`
-- `ShopController`
-- `BlogController`
-- `FollowController`
-- `VoucherController`
-- `VoucherOrderController`
+库存扣减使用单条条件更新语句：
 
-接口统一返回 `Result` 对象，便于前端统一处理成功、失败和数据结构。
-
-### 4.2 持久层
-
-项目使用 MyBatis-Plus：
-
-- 通过 `ServiceImpl` 简化常见 CRUD
-- 通过 `query()`、`update()` 等链式 API 提升开发效率
-- 通过 `MybatisPlusInterceptor` + `PaginationInnerInterceptor` 实现分页
-
-这意味着项目的大量数据库操作不需要手写复杂 SQL，只有个别复杂查询会放在 Mapper 或 XML 中。
-
-### 4.3 Redis 作为核心基础设施
-
-这个项目最有代表性的地方不在于普通 CRUD，而在于 Redis 的广泛使用。Redis 主要承担以下角色：
-
-- 验证码存储
-- 登录 token 存储
-- 店铺缓存
-- 空值缓存，防止缓存穿透
-- 互斥锁 / 逻辑过期，降低缓存击穿风险
-- GEO 附近店铺查询
-- 点赞集合排序
-- 关注集合交集计算
-- Feed 流收件箱
-- 用户签到位图
-- Redis 自增全局 ID
-- 秒杀库存、一人一单校验
-- Stream 消息队列异步下单
-
-可以说，这个项目的高性能设计几乎都围绕 Redis 展开。
-
-### 4.4 登录态设计
-
-项目没有采用传统 Session 登录，而是使用 Redis 保存登录用户信息：
-
-1. 用户提交手机号和验证码
-2. 服务端校验 Redis 中保存的验证码
-3. 登录成功后生成 token
-4. 将用户简要信息写入 Redis Hash
-5. 前端后续请求携带 `authorization` 头
-6. 拦截器读取 token，从 Redis 恢复用户信息
-7. 用户信息写入 `ThreadLocal`
-8. 后续业务代码通过 `UserHolder` 获取当前登录用户
-
-这里使用了两个拦截器：
-
-- `RefreshTokenInterceptor`
-  - 负责解析 token、刷新 TTL、保存用户上下文
-- `LoginInterceptor`
-  - 负责拦截必须登录后才能访问的接口
-
-这种设计比 Session 更适合前后端分离场景。
-
-## 5. 核心业务功能
-
-### 5.1 用户模块
-
-用户模块提供以下能力：
-
-- 发送验证码
-- 验证码登录
-- 查询当前登录用户
-- 查询用户详情
-- 用户签到
-- 连续签到统计
-
-其中签到功能使用 Redis Bitmap 实现：
-
-- 某月某用户的签到记录存为一个位图
-- 当日签到就是设置某一位为 `1`
-- 连续签到统计通过 `BITFIELD` 读取位图后进行位运算
-
-这是一种典型的 Redis 位图应用场景。
-
-### 5.2 店铺模块
-
-店铺模块包括：
-
-- 根据 id 查询店铺详情
-- 更新店铺信息
-- 按名称分页查询
-- 按类型分页查询
-- 按经纬度查询附近店铺
-
-这里有两个重点：
-
-#### 店铺缓存
-
-查询店铺详情时，优先从 Redis 读取，数据库作为兜底源。项目封装了 `CacheClient`，实现了三类缓存策略：
-
-- 缓存穿透保护：缓存空值
-- 缓存击穿保护：互斥锁重建
-- 热点数据保护：逻辑过期
-
-当前默认使用的是“缓存穿透保护”方案。
-
-#### 附近店铺查询
-
-项目将店铺坐标写入 Redis GEO 结构中，查询时根据经纬度和半径检索，再按距离排序后回查 MySQL 详情。
-
-这使项目具备“附近商户”这类本地生活应用常见能力。
-
-### 5.3 笔记 / 社交模块
-
-笔记模块支持：
-
-- 发布探店笔记
-- 查询热门笔记
-- 查询笔记详情
-- 点赞 / 取消点赞
-- 查询点赞用户 Top N
-- 查询关注用户发布的笔记流
-
-其核心实现方式如下：
-
-- 点赞：
-  - MySQL 维护点赞总数
-  - Redis ZSet 保存点赞用户和点赞时间
-- 热门笔记：
-  - 按 `liked` 数倒序分页
-- 关注推送：
-  - 用户发笔记后，将笔记 id 推送到粉丝的收件箱
-  - 收件箱使用 Redis ZSet 实现
-- Feed 滚动分页：
-  - 使用时间戳作为 score
-  - 通过 `reverseRangeByScoreWithScores` 实现滚动分页
-
-这是项目里社交关系和内容分发的核心逻辑。
-
-### 5.4 关注模块
-
-关注模块支持：
-
-- 关注用户
-- 取关用户
-- 判断是否已关注
-- 查询共同关注
-
-实现方式是：
-
-- MySQL 保存正式关注关系
-- Redis Set 保存当前用户关注列表
-- 共同关注通过两个 Set 的交集完成
-
-这种做法兼顾了数据持久性和查询性能。
-
-### 5.5 优惠券与秒杀模块
-
-该模块包括：
-
-- 查询店铺优惠券
-- 新增普通券
-- 新增秒杀券
-- 抢购秒杀券
-
-秒杀券是整个项目最具代表性的高并发场景。
-
-## 6. 秒杀下单主链路
-
-秒杀模块不是直接“请求一进来就操作数据库”，而是设计成“Redis 原子校验 + 异步下单”。
-
-整体流程如下：
-
-1. 用户发起秒杀请求
-2. 服务端生成订单 id
-3. 执行 `seckill.lua`
-4. Lua 脚本在 Redis 中原子完成：
-   - 判断库存是否充足
-   - 判断用户是否重复下单
-   - 扣减库存
-   - 记录购买用户
-   - 将订单消息写入 `stream.orders`
-5. 如果 Lua 返回成功，接口直接返回订单 id
-6. 后台单线程任务持续消费 `Redis Stream`
-7. 消费到订单消息后，再真正落库到 MySQL
-
-### 6.1 为什么这样设计
-
-这样做有几个直接好处：
-
-- Redis 单线程 + Lua 保证校验和扣减原子性
-- 请求线程非常快，不需要同步阻塞数据库写入
-- 异步化后能承受更高并发
-- 利用 Stream 可以处理未确认消息和异常恢复
-
-### 6.2 防止重复下单
-
-即使已经在 Lua 中做过“一人一单”校验，落库时依然又做了一次保护：
-
-- 按用户维度加 Redisson 分布式锁
-- 查询数据库是否已有该用户该券的订单
-- 再扣减数据库库存并保存订单
-
-这属于典型的“双重保护”设计，避免极端并发或消息重复消费带来的问题。
-
-## 7. 关键工具类
-
-### 7.1 `CacheClient`
-
-该类封装了项目的缓存通用能力，是整个项目非常重要的基础组件。
-
-它的价值在于：
-
-- 把缓存写入逻辑统一封装
-- 把缓存穿透、击穿、逻辑过期方案统一封装
-- 让业务代码不必重复处理缓存细节
-
-### 7.2 `RedisIdWorker`
-
-这是一个基于 Redis 的全局唯一 ID 生成器，核心思路是：
-
-- 高位使用时间戳
-- 低位使用 Redis 当日自增序列
-
-它能生成趋势递增、全局唯一的 long 型 id，很适合订单号这类业务。
-
-### 7.3 `UserHolder`
-
-`UserHolder` 本质上是一个 `ThreadLocal<UserDTO>` 包装器，用于保存当前线程的登录用户信息。
-
-业务代码无需每次显式传递用户对象，只需：
-
-- 拦截器写入
-- Service 中读取
-- 请求完成后移除
-
-这让登录态获取更加简洁。
-
-## 8. 数据模型
-
-从 `db/hmdp.sql` 可以看出，主要表包括：
-
-- `tb_user`
-  - 用户
-- `tb_user_info`
-  - 用户详情
-- `tb_shop`
-  - 店铺
-- `tb_shop_type`
-  - 店铺分类
-- `tb_blog`
-  - 探店笔记
-- `tb_blog_comments`
-  - 笔记评论
-- `tb_follow`
-  - 关注关系
-- `tb_voucher`
-  - 优惠券
-- `tb_seckill_voucher`
-  - 秒杀券
-- `tb_voucher_order`
-  - 优惠券订单
-
-整体上是一个典型的“本地生活 + 社交 + 营销”活动后端模型。
-
-## 9. 运行依赖与注意事项
-
-从当前配置文件可以看出，项目依赖：
-
-- MySQL 数据库
-- Redis 服务
-
-并且配置中已经写死了数据库和 Redis 连接信息，说明这个仓库当前更偏学习/demo 项目，而不是可直接上线的生产配置方式。
-
-另外，秒杀模块运行前需要提前在 Redis 中创建 Stream 消费组，源码注释里已经明确提示：
-
-```bash
-XGROUP CREATE stream.orders g1 0 MKSTREAM
+```sql
+update tb_seckill_voucher
+set stock = stock - 1
+where voucher_id = ?
+  and stock > 0;
 ```
 
-如果没有提前创建，秒杀订单消费者会报错。
+只要更新成功，就说明本次请求实际拿到了库存；如果更新影响行数为 `0`，则说明库存已经耗尽。
 
-## 10. 项目特点总结
+这条语句本身是原子的，底层依赖 InnoDB 对 `tb_seckill_voucher` 热点行的行级锁控制，不会把库存扣成负数。
 
-这个项目最核心的价值不在于“表有多少、接口有多少”，而在于它集中展示了很多典型 Redis 实战方案：
+### 3.3 事务一致性
 
-- Redis 缓存穿透处理
-- Redis 互斥锁
-- 逻辑过期缓存重建
-- Redis GEO
-- Redis Bitmap
-- Redis Set 交集
-- Redis ZSet 排行与 Feed 流
-- Redis Stream 异步消息
-- Lua 原子脚本
-- Redis 全局 ID
-- Redisson 分布式锁
+下单逻辑放在同一个数据库事务中：
 
-所以如果把它当成“一个 Spring Boot 练手项目”来看，重点不只是 CRUD，而是：
+- 已下单检查
+- 条件扣减库存
+- 插入订单
 
-**如何把 Redis 深度融入业务系统，解决缓存、登录、高并发和社交数据结构问题。**
+如果插入订单时因为唯一索引冲突失败，则事务回滚，之前的库存扣减也会一起回滚，因此不会出现“库存扣掉了，但订单没生成”的脏结果。
 
-## 11. 一句话总结
+## 4. 压测专用登录绕过
 
-`hm-dianping` 是一个基于 Spring Boot + MyBatis-Plus + MySQL + Redis 的点评类后端项目，重点演示了 Redis 在登录态、缓存优化、GEO 搜索、社交关系、签到统计和秒杀高并发场景中的实际用法。
+为了避免压测阶段仍然依赖 Redis token 校验，当前分支增加了压测专用身份注入：
+
+- 请求头：`X-Benchmark-User-Id`
+- 开关：`--app.benchmark.skip-login-check=true`
+
+相关实现位于：
+
+- [BenchmarkUserInterceptor](src/main/java/com/livepick/utils/BenchmarkUserInterceptor.java)
+- [MvcConfig](src/main/java/com/livepick/config/MvcConfig.java)
+
+压测时直接向秒杀接口发送不同的 `X-Benchmark-User-Id` 即可，不需要提前准备 Redis 登录态。
+
+## 5. 数据库变更
+
+当前分支相对原始实现的关键数据库调整：
+
+1. `tb_voucher_order.id` 改为 MySQL 自增主键
+2. `tb_voucher_order` 增加 `(voucher_id, user_id)` 唯一索引
+
+迁移脚本位于：
+
+- [hmdp2_mysql_only_seckill.sql](src/main/resources/db/hmdp2_mysql_only_seckill.sql)
+
+建议使用独立数据库进行压测，例如：
+
+- `livpick_mysql_only`
+
+## 6. JMeter 压测资产
+
+当前分支的正式压测方案统一放在：
+
+- [benchmark/jmeter/mysql-only](benchmark/jmeter/mysql-only)
+
+其中包括：
+
+- `baseline-throughput.jmx`  
+  吞吐基线场景
+- `oversell-check.jmx`  
+  库存不超卖校验场景
+- `one-user-one-order.jmx`  
+  一人一单校验场景
+- `run-jmeter-benchmark.ps1`  
+  一键回放脚本
+- `data/`  
+  压测用户数据
+- `sql/`  
+  数据重置与结果核对脚本
+- `report/mysql-only-benchmark-report.md`  
+  中文正式压测报告
+
+说明文档见：
+
+- [benchmark/jmeter/mysql-only/README.md](benchmark/jmeter/mysql-only/README.md)
+
+## 7. 启动与复现
+
+### 7.1 启动应用
+
+推荐使用 JDK 11，并连接独立压测库：
+
+```powershell
+& 'C:\Program Files\Java\jdk-11\bin\java.exe' `
+  -jar target\LivPick-0.0.1-SNAPSHOT.jar `
+  --spring.datasource.url=jdbc:mysql://127.0.0.1:3306/livpick_mysql_only?useSSL=false&serverTimezone=UTC `
+  --app.benchmark.skip-login-check=true
+```
+
+### 7.2 执行完整压测
+
+```powershell
+powershell -ExecutionPolicy Bypass -File benchmark\jmeter\mysql-only\run-jmeter-benchmark.ps1 -Scenario all
+```
+
+### 7.3 单独执行某个场景
+
+```powershell
+powershell -ExecutionPolicy Bypass -File benchmark\jmeter\mysql-only\run-jmeter-benchmark.ps1 -Scenario baseline-100
+```
+
+可选场景：
+
+- `baseline-50`
+- `baseline-100`
+- `baseline-200`
+- `baseline-500`
+- `oversell-100`
+- `one-user-one-order-100`
+- `all`
+
+## 8. 当前压测结果
+
+正式压测结果目录：
+
+- `target/benchmark/jmeter/run-20260527-000448`
+
+### 8.1 吞吐基线
+
+| 并发线程数 | 样本数 | 成功数 | 失败数 | QPS | Avg(ms) | P95(ms) | P99(ms) | Max(ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 12663 | 12663 | 0 | 211.72 | 226.50 | 281 | 316 | 590 |
+| 100 | 13101 | 13101 | 0 | 219.02 | 438.59 | 546 | 648 | 840 |
+| 200 | 11661 | 11661 | 0 | 195.08 | 990.25 | 1647 | 1998 | 3416 |
+| 500 | 12817 | 12817 | 0 | 214.58 | 2265.56 | 3290 | 3355 | 4200 |
+
+结论：
+
+- 当前机器上，`100` 线程时吞吐达到本轮峰值
+- 并发从 `100` 提高到 `200`、`500` 后，QPS 没有继续明显增长
+- 但平均响应时间和尾延迟显著恶化，说明系统已经进入明显竞争区间
+
+### 8.2 库存不超卖校验
+
+场景结果：
+
+- 样本数：`22806`
+- 成功数：`3000`
+- 失败数：`19806`
+- 失败原因：全部为 `Out of stock`
+- 最终库存：`0`
+- 最终订单数：`3000`
+
+结论：库存没有超卖。
+
+### 8.3 一人一单校验
+
+场景结果：
+
+- 样本数：`5000`
+- 成功数：`1000`
+- 失败数：`4000`
+- 失败原因：全部为 `Duplicate orders are not allowed`
+- 最终订单数：`1000`
+- 重复下单用户数：`0`
+
+结论：一人一单成立。
+
+## 9. 如何看待当前性能上限
+
+当前这套 `MySQL-only` 方案的性能特征比较清晰：
+
+1. 正确性已经成立  
+   库存不超卖、一人一单、事务回滚一致性都已经通过压测校验。
+
+2. 热点竞争明显  
+   所有请求都会竞争同一张秒杀库存表中的同一行数据，这会导致高并发下响应时间迅速升高。
+
+3. 适合作为基线方案  
+   后续无论是引入 Redis 预扣库存，还是引入 Kafka 异步削峰，都可以直接和当前方案做同口径对比。
+
+## 10. 后续对比时建议保持不变的变量
+
+为了让后续 `MySQL + Redis`、`MySQL + Redis + Kafka` 方案的压测结果可比，建议继续保持以下变量不变：
+
+- 同一台压测机器
+- 同一 JDK 版本
+- 同一秒杀券 ID
+- 同一压测时长
+- 同一并发档位
+- 同一批压测用户数据
+- 同一数据库重置方式
+- 同一报表口径
+
+建议只改变“秒杀链路实现方式”，不要同时更换压测工具、登录方案或数据规模，否则结论会变得不干净。
+
+## 11. 如何定位性能瓶颈
+
+仅凭 JMeter 的 `QPS / Avg / P95 / P99`，只能看到“系统变慢了”，还不能直接证明瓶颈到底在应用线程池、数据库连接池、CPU、GC 还是 MySQL 锁竞争。
+
+更稳妥的判断方式是同时采集三类信息：
+
+### 11.1 压测结果现象
+
+先看外部表现：
+
+- 并发提升后，QPS 是否继续增长
+- 平均响应时间、P95、P99 是否明显恶化
+- 是否出现请求失败、超时或连接异常
+
+当前分支的现象是：
+
+- `100` 线程附近吞吐接近峰值
+- 提高到 `200`、`500` 线程后，QPS 没有同步提升
+- 但响应时间显著上升
+
+这说明系统已经进入竞争区间，但还不能仅靠这一步断言根因。
+
+### 11.2 应用侧指标
+
+压测时建议同时观察：
+
+- Java 进程 CPU
+- 堆内存占用
+- Full GC / Young GC 次数与耗时
+- Tomcat 活跃线程数、等待线程数
+- 数据库连接池活跃连接数、等待连接数
+
+如果出现以下特征，通常说明问题更偏应用层：
+
+- CPU 长时间接近 `100%`
+- GC 明显频繁，且 STW 时间上升
+- Tomcat 工作线程被占满
+- Hikari 连接池活跃连接打满，等待队列增长
+
+### 11.3 MySQL 侧指标
+
+对于当前 `MySQL-only` 秒杀方案，MySQL 指标尤其关键：
+
+- MySQL CPU
+- 活跃连接数
+- 慢查询数量
+- InnoDB 行锁等待时间
+- 行锁等待次数
+- 死锁次数
+- `SHOW ENGINE INNODB STATUS`
+
+如果出现以下特征，通常说明问题更偏数据库竞争：
+
+- `tb_seckill_voucher` 热点行的锁等待明显增加
+- 数据库 CPU 并不一定打满，但事务等待时间上升
+- QPS 上不去，RT 却持续增大
+
+### 11.4 对当前方案的合理推断
+
+结合当前实现和已有压测结果，可以做一个“高概率推断”：
+
+- 主要瓶颈大概率在数据库侧的热点行竞争
+- 竞争点是 `tb_seckill_voucher` 中同一张秒杀券对应的那一行
+- 原因是所有请求都会执行库存扣减更新，并且还会伴随订单查询与订单插入
+
+但这仍然是推断，不是最终证据。要把结论写得更硬，需要你在下一轮压测时把应用侧和 MySQL 侧指标一起采出来。
+
+### 11.5 推荐的排查顺序
+
+建议按下面顺序排查：
+
+1. 先看 JMeter 报告，确定是“QPS 上不去”还是“错误率上升”
+2. 再看 Java 进程 CPU、内存、GC，判断是否是应用本身先打满
+3. 再看连接池是否耗尽
+4. 最后重点看 MySQL 锁等待、事务等待和慢查询
+
+对于当前这条 `MySQL-only` 链路，如果你看到：
+
+- 错误率很低
+- QPS 基本封顶
+- RT 随并发升高显著上升
+- MySQL 行锁等待同步增加
+
+那就可以比较有把握地说，瓶颈主要在数据库库存热点行竞争，而不是登录拦截、网络或 JMeter 本身。

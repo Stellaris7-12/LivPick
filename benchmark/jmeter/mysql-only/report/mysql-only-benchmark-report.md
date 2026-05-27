@@ -1,87 +1,48 @@
-# MySQL-only 秒杀模块 JMeter 压测报告
+# MySQL-only 秒杀压测与瓶颈诊断报告
 
-## 1. 报告概览
+## 1. 结论摘要
 
-本报告针对当前 `MySQL-only` 方案下的秒杀模块进行 JMeter 压测，重点验证以下两类目标：
+本分支已经完成两类验证：
 
-- 库存不超卖
-- 一人一单
+1. 业务正确性
+   - 库存不超卖成立
+   - 一人一单成立
+2. 性能与瓶颈定位
+   - `MySQL-only` 基线吞吐约为 `200+ QPS`
+   - 并发从 `100` 继续拉高到 `200`、`500` 后，QPS 基本封顶，但 RT 明显恶化
+   - 主瓶颈是 `tb_seckill_voucher` 热点库存行的 InnoDB 行锁竞争
+   - 连接池排队是次级现象，不是主因
+   - CPU、内存、GC 不是当前主瓶颈
 
-同时采集并分析以下核心性能指标：
-
-- 吞吐量 / QPS
-- 样本总数
-- 成功数 / 失败数
-- 平均响应时间
-- P95 / P99 / 最大响应时间
-- 错误率
-- 失败原因分桶
-- 压测后数据库最终库存与订单数
-
-本次正式压测基于仓库内提交的 JMeter 文件执行，回放脚本如下：
-
-- `benchmark/jmeter/mysql-only/run-jmeter-benchmark.ps1`
-
-## 2. 压测环境
+## 2. 环境与口径
 
 - 分支：`feature/seckill-db-only`
-- 应用启动命令：
-
-```powershell
-java -jar target\LivPick-0.0.1-SNAPSHOT.jar --spring.datasource.url=jdbc:mysql://127.0.0.1:3306/livpick_mysql_only?useSSL=false&serverTimezone=UTC --app.benchmark.skip-login-check=true
-```
-
+- 应用：`target/LivPick-0.0.1-SNAPSHOT.jar`
 - JDK：`11`
 - 数据库：`livpick_mysql_only`
-- JMeter 路径：`C:\Users\heyunhui\Documents\apache-jmeter-5.6.3`
+- 压测工具：`JMeter 5.6.3`
 - 压测接口：`POST /voucher-order/seckill/7`
-- 鉴权方式：请求头 `X-Benchmark-User-Id`
+- 身份注入：`X-Benchmark-User-Id`
+- 正式脚本：`benchmark/jmeter/mysql-only/run-jmeter-benchmark.ps1`
+- 监控脚本：`benchmark/jmeter/mysql-only/collect-runtime-monitor.ps1`
 
-## 3. 控制变量
+固定控制变量：
 
-为保证本次压测结果可复现，且后续便于与 Redis / Kafka 优化方案对比，本次固定以下变量不变：
-
-- 同一台机器
-- 同一 JDK 版本
-- 同一应用实例
-- 同一数据库 schema
-- 同一接口路径
+- 同一机器
+- 同一 JDK
+- 同一数据库
 - 同一券 ID：`7`
-- 同一请求头注入方式
-- 同一 JMeter 版本
 - 同一 `rampUpSeconds=5`
 - 同一 `durationSeconds=60`
+- 同一用户数据文件
 
-其中：
+## 3. 正式压测结果
 
-- 吞吐基线与超卖校验使用：`data/user_ids_unique.csv`
-- 一人一单校验使用：`data/user_ids_repeat.csv`
-
-## 4. 压测产物
-
-本次正式压测生成目录：
+正式压测结果目录：
 
 - `target/benchmark/jmeter/run-20260527-000448`
 
-其中包含：
-
-- 每个场景的 `.jtl`
-- 每个场景的 HTML dashboard
-- 每个场景的数据库核对结果
-- 聚合汇总文件 `aggregate-summary.csv`
-
-本次生成的 dashboard 目录如下：
-
-- `target/benchmark/jmeter/run-20260527-000448/baseline-50/dashboard`
-- `target/benchmark/jmeter/run-20260527-000448/baseline-100/dashboard`
-- `target/benchmark/jmeter/run-20260527-000448/baseline-200/dashboard`
-- `target/benchmark/jmeter/run-20260527-000448/baseline-500/dashboard`
-- `target/benchmark/jmeter/run-20260527-000448/oversell-100/dashboard`
-- `target/benchmark/jmeter/run-20260527-000448/one-user-one-order-100/dashboard`
-
-## 5. 吞吐基线压测
-
-基线场景压测前统一将秒杀券库存重置为 `50000`。
+### 3.1 吞吐基线
 
 | 并发线程数 | 样本数 | 成功数 | 失败数 | QPS | Avg(ms) | P95(ms) | P99(ms) | Max(ms) | 错误率 | 最终库存 | 最终订单数 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -92,14 +53,11 @@ java -jar target\LivPick-0.0.1-SNAPSHOT.jar --spring.datasource.url=jdbc:mysql:/
 
 结论：
 
-- 本轮测试中，`100` 线程时吞吐最高，为 `219.02 QPS`
-- 当并发从 `100` 提高到 `200`、`500` 后，吞吐并没有继续提升
-- 但平均响应时间和尾延迟显著恶化，尤其是 `500` 线程下 `P95` 已达到 `3290ms`
-- 说明纯 MySQL 方案在较高并发下受数据库库存行竞争和订单唯一约束竞争影响明显
+- 本机环境下，`100` 线程时吞吐最高，为 `219.02 QPS`
+- `100 -> 200 -> 500` 后，吞吐没有继续稳定提升
+- 但平均响应时间和尾延迟显著恶化
 
-## 6. 库存不超卖校验
-
-超卖校验场景压测前统一将秒杀券库存重置为 `3000`。
+### 3.2 库存不超卖校验
 
 | 并发线程数 | 样本数 | 成功数 | 失败数 | QPS | Avg(ms) | P95(ms) | P99(ms) | Max(ms) | 错误率 | 失败原因 | 最终库存 | 最终订单数 | 结论 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
@@ -109,25 +67,15 @@ java -jar target\LivPick-0.0.1-SNAPSHOT.jar --spring.datasource.url=jdbc:mysql:/
 
 - 最终库存：`0`
 - 最终订单数：`3000`
-- 失败全部为库存耗尽导致的业务失败
+- 没有负库存
 
-结论：
+### 3.3 一人一单校验
 
-- 未出现负库存
-- 未出现最终订单数超过初始库存的情况
-- 库存不超卖成立
-
-对应数据库校验文件：
-
-- `target/benchmark/jmeter/run-20260527-000448/oversell-100/oversell-100.db-check.txt`
-
-## 7. 一人一单校验
-
-一人一单场景使用重复用户数据：
+场景数据：
 
 - 唯一用户数：`1000`
 - 每个用户重复 `5` 次
-- 总请求行数：`5000`
+- 总请求：`5000`
 
 | 并发线程数 | 样本数 | 成功数 | 失败数 | QPS | Avg(ms) | P95(ms) | P99(ms) | Max(ms) | 错误率 | 失败原因 | 最终订单数 | 重复用户数 | 结论 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
@@ -138,19 +86,120 @@ java -jar target\LivPick-0.0.1-SNAPSHOT.jar --spring.datasource.url=jdbc:mysql:/
 - 最终订单数：`1000`
 - 重复下单用户数：`0`
 
-结论：
+## 4. 带监控压测结果
 
-- 每个用户最终最多只有 1 笔订单
-- 并发重复请求被正确拦截
-- 一人一单成立
+本轮瓶颈定位只跑三档基线：
 
-对应数据库校验文件：
+- `target/benchmark/jmeter/run-20260527-113409`
+- `target/benchmark/jmeter/run-20260527-114025`
+- `target/benchmark/jmeter/run-20260527-114347`
 
-- `target/benchmark/jmeter/run-20260527-000448/one-user-one-order-100/one-user-one-order-100.db-check.txt`
+| 场景 | 样本数 | QPS | Avg(ms) | P95(ms) | P99(ms) | Max(ms) | Max App CPU | Max MySQL CPU | Max System CPU | Min Free Mem(MB) | Max Threads Connected | Max Threads Running | Max Row Lock Waits | Max Data Lock Waits | Max Old Gen | YGC 增量 | FGC 增量 | GC 时间增量(s) | Row Lock Waits 增量 | Row Lock Time 增量(ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline-100 | 13114 | 219.29 | 438.59 | 496 | 571 | 1329 | 6.81% | 8.06% | 42.44% | 2577 | 11 | 11 | 8 | 36 | 69.67% | 28 | 0 | 0.056 | 13089 | 467018 |
+| baseline-200 | 13572 | 227.14 | 850.67 | 971 | 1656 | 2685 | 7.88% | 6.00% | 22.22% | 2519 | 11 | 12 | 8 | 36 | 74.88% | 30 | 0 | 0.095 | 13525 | 469224 |
+| baseline-500 | 13737 | 230.10 | 2109.61 | 2612 | 3061 | 3905 | 7.69% | 6.06% | 33.42% | 2399 | 11 | 12 | 8 | 36 | 77.72% | 32 | 0 | 0.102 | 13614 | 475740 |
 
-## 8. 如何复现
+## 5. 瓶颈判断
 
-### 8.1 启动应用
+### 5.1 先看现象
+
+从 `100 -> 200 -> 500` 线程：
+
+- QPS 只从 `219.29` 增长到 `230.10`
+- Avg 从 `438.59ms` 增长到 `2109.61ms`
+- P99 从 `571ms` 增长到 `3061ms`
+
+这说明系统在 `100` 线程附近已经接近吞吐平台期。后续增加线程主要带来排队和等待，而不是有效吞吐增长。
+
+### 5.2 排除 CPU / 内存 / GC
+
+应用和系统侧没有出现资源打满特征：
+
+- Java 进程 CPU 峰值最高 `7.88%`
+- MySQL 进程 CPU 峰值最高 `8.06%`
+- 系统 CPU 峰值最高 `42.44%`
+- 系统可用内存始终大于 `2399MB`
+- 三档场景 `FGC` 增量都为 `0`
+- GC 总耗时增量仅 `0.056s`、`0.095s`、`0.102s`
+
+结论：当前不是 CPU 打满，也不是 Full GC 或明显内存压力导致的 RT 恶化。
+
+### 5.3 数据库并发没有随线程数同步提升
+
+- `Threads_connected` 峰值始终是 `11`
+- `Threads_running` 峰值始终在 `11~12`
+
+说明随着压测线程从 `100` 提高到 `500`，数据库实际活跃并发并没有同比增加。请求在进入数据库之前，或者在数据库内部已经开始排队。
+
+### 5.4 行锁等待持续存在
+
+- `Innodb_row_lock_current_waits` 峰值始终达到 `8`
+- `data_lock_waits` 峰值达到 `36`
+- `RowLockWaits` 每轮都增加 `13000+`
+- `RowLockTime` 每轮都增加 `46~47` 万毫秒
+
+这说明活跃事务中持续存在明显的行锁等待。
+
+### 5.5 热点 SQL 很明确
+
+`baseline-500` 的 `statement-digest.txt` 显示：
+
+```text
+UPDATE tb_seckill_voucher SET stock = stock - ? WHERE ( voucher_id = ? AND stock > ? )
+COUNT_STAR = 159101
+total_seconds = 5317.67
+avg_ms = 33.423
+```
+
+同一轮里：
+
+- 查询秒杀券 SQL 平均 `0.252ms`
+- 查询是否已下单 SQL 平均 `0.230ms`
+- 插入订单 SQL 平均 `0.247ms`
+
+`lock-diagnostics.txt` 也显示：
+
+- `tb_seckill_voucher` 是等待最重的表
+- `tb_voucher_order` 次之
+
+## 6. 最终结论
+
+主瓶颈是：
+
+- `tb_seckill_voucher` 热点库存行的 InnoDB 行锁竞争
+
+次级现象是：
+
+- 有限数据库并发能力下的连接池/请求排队
+
+可基本排除的方向：
+
+- Java CPU 打满
+- MySQL CPU 打满
+- 系统内存不足
+- Full GC 抖动
+- MySQL `max_connections` 被打满
+
+更准确地说，当前 `MySQL-only` 方案的问题不是“机器跑不动”，而是“所有请求都去竞争同一条库存更新 SQL”，导致热点库存行成为主瓶颈。
+
+## 7. 对后续优化方案的启发
+
+这份基线报告说明了后续优化的真正目标：
+
+1. 不要只靠增加线程数提升吞吐
+2. 优先减少数据库热点库存行竞争
+3. 后续 `MySQL + Redis`、`MySQL + Redis + Kafka` 方案必须沿用同一套压测口径和伴随指标
+
+如果要做简历或答辩量化，可以直接引用：
+
+- `MySQL-only` 基线约 `220~230 QPS`
+- 并发继续提高时，吞吐基本封顶，但 `P99` 升到 `3s` 级
+- 瓶颈定位为数据库热点库存行竞争，而不是 CPU / GC 资源耗尽
+
+## 8. 如何复跑
+
+启动应用：
 
 ```powershell
 & 'C:\Program Files\Java\jdk-11\bin\java.exe' `
@@ -159,54 +208,23 @@ java -jar target\LivPick-0.0.1-SNAPSHOT.jar --spring.datasource.url=jdbc:mysql:/
   --app.benchmark.skip-login-check=true
 ```
 
-### 8.2 执行完整 JMeter 压测
+执行完整压测：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File benchmark\jmeter\mysql-only\run-jmeter-benchmark.ps1 -Scenario all
 ```
 
-### 8.3 单独执行某个场景
+执行带监控场景：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File benchmark\jmeter\mysql-only\run-jmeter-benchmark.ps1 -Scenario baseline-100
+powershell -ExecutionPolicy Bypass -File benchmark\jmeter\mysql-only\run-jmeter-benchmark.ps1 -Scenario baseline-500 -EnableMonitoring
 ```
 
-### 8.4 查看压测结果
+主要产物位置：
 
-- JTL：`target/benchmark/jmeter/run-<timestamp>/<scenario>/`
-- Dashboard：`target/benchmark/jmeter/run-<timestamp>/<scenario>/dashboard/`
-- 数据库核对文件：`target/benchmark/jmeter/run-<timestamp>/<scenario>/`
-- 聚合结果：`target/benchmark/jmeter/run-<timestamp>/aggregate-summary.csv`
-
-## 9. 仓库内相关测试文件
-
-本次压测相关文件已提交到以下位置：
-
-- `benchmark/jmeter/mysql-only/baseline-throughput.jmx`
-- `benchmark/jmeter/mysql-only/oversell-check.jmx`
-- `benchmark/jmeter/mysql-only/one-user-one-order.jmx`
-- `benchmark/jmeter/mysql-only/run-jmeter-benchmark.ps1`
-- `benchmark/jmeter/mysql-only/sql/reset_stock_large.sql`
-- `benchmark/jmeter/mysql-only/sql/reset_stock_small.sql`
-- `benchmark/jmeter/mysql-only/sql/check_results.sql`
-- `benchmark/jmeter/mysql-only/data/user_ids_unique.csv`
-- `benchmark/jmeter/mysql-only/data/user_ids_repeat.csv`
-
-## 10. 总结
-
-本次基于 JMeter 的正式压测表明：
-
-1. `MySQL-only` 方案在当前机器上可以稳定支撑约 `200+ QPS` 的秒杀请求
-2. 在并发线程数达到 `100` 左右时吞吐达到本轮峰值
-3. 提高到 `200`、`500` 线程后，吞吐没有进一步提升，但响应时间恶化明显
-4. 库存不超卖校验通过
-5. 一人一单校验通过
-
-因此，当前分支已经具备：
-
-- 可复现的 JMeter 压测方案
-- 完整的压测配置与数据文件
-- 正式压测结果
-- 数据库正确性校验证据
-
-这可以作为后续 `MySQL + Redis`、`MySQL + Redis + Kafka` 方案横向对比的基准版本。
+- `target/benchmark/jmeter/run-<timestamp>/aggregate-summary.csv`
+- `target/benchmark/jmeter/run-<timestamp>/<scenario>/*.jtl`
+- `target/benchmark/jmeter/run-<timestamp>/<scenario>/dashboard/`
+- `target/benchmark/jmeter/run-<timestamp>/<scenario>/runtime-monitor.csv`
+- `target/benchmark/jmeter/run-<timestamp>/<scenario>/statement-digest.txt`
+- `target/benchmark/jmeter/run-<timestamp>/<scenario>/lock-diagnostics.txt`

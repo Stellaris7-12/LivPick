@@ -1,0 +1,28 @@
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: livpick-redis-db-cache
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server \
+            --appendonly yes \
+            --save 60 1000 \
+            --requirepass "$$REDIS_PASSWORD";
+        else
+          exec redis-server \
+            --appendonly yes \
+            --save 60 1000;
+        fi
+    volumes:
+      - livpick-redis-db-cache-data:/data
+
+volumes:
+  livpick-redis-db-cache-data:

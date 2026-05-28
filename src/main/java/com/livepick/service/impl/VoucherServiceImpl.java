@@ -7,13 +7,19 @@ import com.livepick.entity.Voucher;
 import com.livepick.mapper.VoucherMapper;
 import com.livepick.service.ISeckillVoucherService;
 import com.livepick.service.IVoucherService;
+import com.livepick.utils.CacheClient;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
+import static com.livepick.utils.RedisConstants.CACHE_VOUCHER_LIST_KEY;
+import static com.livepick.utils.RedisConstants.CACHE_VOUCHER_LIST_TTL;
+import static com.livepick.utils.RedisConstants.LOCK_VOUCHER_LIST_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 /**
@@ -31,13 +37,31 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     private ISeckillVoucherService seckillVoucherService;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private CacheClient cacheClient;
 
     @Override
     public Result queryVoucherOfShop(Long shopId) {
-        // 查询优惠券信息
-        List<Voucher> vouchers = getBaseMapper().queryVoucherOfShop(shopId);
-        // 返回结果
+        List<Voucher> vouchers = cacheClient.queryListWithLogicalExpire(
+                CACHE_VOUCHER_LIST_KEY,
+                LOCK_VOUCHER_LIST_KEY,
+                shopId,
+                Voucher.class,
+                id -> {
+                    List<Voucher> result = getBaseMapper().queryVoucherOfShop(id);
+                    return result == null ? Collections.emptyList() : result;
+                },
+                CACHE_VOUCHER_LIST_TTL,
+                TimeUnit.MINUTES
+        );
         return Result.ok(vouchers);
+    }
+
+    @Override
+    @Transactional
+    public void addVoucher(Voucher voucher) {
+        save(voucher);
+        clearVoucherListCache(voucher.getShopId());
     }
 
     @Override
@@ -54,5 +78,13 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         seckillVoucherService.save(seckillVoucher);
         // 保存秒杀库存到Redis中
         stringRedisTemplate.opsForValue().set(SECKILL_STOCK_KEY + voucher.getId(), voucher.getStock().toString());
+        clearVoucherListCache(voucher.getShopId());
+    }
+
+    private void clearVoucherListCache(Long shopId) {
+        if (shopId == null) {
+            return;
+        }
+        stringRedisTemplate.delete(CACHE_VOUCHER_LIST_KEY + shopId);
     }
 }

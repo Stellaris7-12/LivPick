@@ -156,19 +156,19 @@ function Get-RedisDockerArgs {
 }
 
 function Invoke-RedisCli {
-    param([string[]]$Args)
-    return & docker @((Get-RedisDockerArgs) + $Args) 2>$null
+    param([string[]]$RedisArgs)
+    return & docker @((Get-RedisDockerArgs) + $RedisArgs) 2>$null
 }
 
 function Clear-RedisPattern {
     param([string]$Pattern)
 
-    $keys = @(Invoke-RedisCli -Args @("--raw", "--scan", "--pattern", $Pattern))
+    $keys = @(Invoke-RedisCli -RedisArgs @("--raw", "--scan", "--pattern", $Pattern))
     foreach ($key in $keys) {
         if ([string]::IsNullOrWhiteSpace($key)) {
             continue
         }
-        Invoke-RedisCli -Args @("DEL", $key) | Out-Null
+        Invoke-RedisCli -RedisArgs @("DEL", $key) | Out-Null
     }
 }
 
@@ -176,7 +176,11 @@ function Get-DbScalar {
     param([string]$Sql)
 
     $result = mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb --batch --raw --skip-column-names -e $Sql 2>$null
-    return ($result | Select-Object -First 1)
+    $value = ($result | Select-Object -First 1)
+    if ($null -eq $value) {
+        return ""
+    }
+    return "$value".Trim()
 }
 
 function Reset-Database {
@@ -191,11 +195,16 @@ function Reset-Database {
 function Reset-RedisState {
     Clear-RedisPattern -Pattern "cache:shop:*"
     Clear-RedisPattern -Pattern "cache:voucher:list:*"
-    Invoke-RedisCli -Args @("DEL", "seckill:stock:$VoucherId", "seckill:order:$VoucherId") | Out-Null
+    Invoke-RedisCli -RedisArgs @("DEL", "seckill:stock:$VoucherId", "seckill:order:$VoucherId") | Out-Null
 
     $stock = Get-DbScalar -Sql "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId;"
     if (-not [string]::IsNullOrWhiteSpace($stock)) {
-        Invoke-RedisCli -Args @("SET", "seckill:stock:$VoucherId", "$stock") | Out-Null
+        Invoke-RedisCli -RedisArgs @("SET", "seckill:stock:$VoucherId", "$stock") | Out-Null
+        $seededStock = @(Invoke-RedisCli -RedisArgs @("GET", "seckill:stock:$VoucherId") | Select-Object -First 1)
+        $seededValue = if ($seededStock.Count -gt 0 -and $seededStock[0] -ne $null) { "$($seededStock[0])".Trim() } else { "" }
+        if ($seededValue -ne "$stock") {
+            throw "Failed to seed Redis stock for voucher $VoucherId. Expected $stock but got '$seededValue'."
+        }
     }
 }
 

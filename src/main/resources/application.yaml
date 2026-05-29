@@ -28,3 +28,10 @@ logging:
     com.livepick: debug
   pattern:
     dateformat: mm:ss.SSS
+app:
+  benchmark:
+    enabled: ${APP_BENCHMARK_ENABLED:false}
+    skip-login-check: ${APP_BENCHMARK_SKIP_LOGIN_CHECK:false}
+  seckill:
+    consumer:
+      enabled: ${APP_SECKILL_CONSUMER_ENABLED:true}

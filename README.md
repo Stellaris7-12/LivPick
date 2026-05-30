@@ -151,9 +151,9 @@ docker compose -f docker-compose.redis.yml up -d
 
 初始化文件：
 
-- [benchmark/jmeter/db-cache/sql/create_database.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/db-cache/sql/create_database.sql:1)
+- [benchmark/suites/db-cache/standard/sql/create_database.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/suites/db-cache/standard/sql/create_database.sql:1)
 - [src/main/resources/db/hmdp2.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/src/main/resources/db/hmdp2.sql:1)
-- [benchmark/jmeter/db-cache/sql/patch_schema.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/db-cache/sql/patch_schema.sql:1)
+- [benchmark/suites/db-cache/standard/sql/patch_schema.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/suites/db-cache/standard/sql/patch_schema.sql:1)
 
 当前 `application.yaml` 已支持通过环境变量切换数据库名：
 
@@ -171,10 +171,10 @@ docker compose -f docker-compose.redis.yml up -d
 
 为后续 `MySQL + Redis` 压测，本分支已新增：
 
-- [benchmark/jmeter/db-cache/README.md](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/db-cache/README.md:1)
-- [benchmark/jmeter/db-cache/sql/reset_stock_large.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/db-cache/sql/reset_stock_large.sql:1)
-- [benchmark/jmeter/db-cache/sql/reset_stock_small.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/db-cache/sql/reset_stock_small.sql:1)
-- [benchmark/jmeter/db-cache/sql/check_results.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/db-cache/sql/check_results.sql:1)
+- [benchmark/reports/db-cache.md](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/reports/db-cache.md:1)
+- [benchmark/suites/db-cache/standard/sql/reset_stock_large.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/suites/db-cache/standard/sql/reset_stock_large.sql:1)
+- [benchmark/suites/db-cache/standard/sql/reset_stock_small.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/suites/db-cache/standard/sql/reset_stock_small.sql:1)
+- [benchmark/suites/db-cache/standard/sql/check_results.sql](/C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/suites/db-cache/standard/sql/check_results.sql:1)
 
 这些文件的口径与 `mysql-only` 保持一致，目标是后续方便横向比较：
 

@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 Set-Location $root
 
 $jmeterBat = Join-Path $JMeterHome "bin\jmeter.bat"
@@ -29,7 +29,7 @@ if (-not $appConnection) {
 }
 
 $appPid = $appConnection.OwningProcess
-$monitorScript = Join-Path $root "benchmark\jmeter\mysql-only\collect-runtime-monitor.ps1"
+$monitorScript = Join-Path $root "benchmark\suites\mysql-only\standard\collect-runtime-monitor.ps1"
 $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $jstatCommand = Get-Command jstat.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 $jstatPath = if ($jstatCommand) { $jstatCommand.Source } else { "" }
@@ -350,25 +350,25 @@ function Invoke-Scenario {
     $summary | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $scenarioDir "$Name.summary.json")
 }
 
-Reset-Database -SqlFile "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-& $jmeterBat '-n' '-t' 'benchmark\jmeter\mysql-only\baseline-throughput.jmx' '-Jthreads=10' '-JrampUpSeconds=2' '-JdurationSeconds=10' '-JuserCsv=benchmark/jmeter/mysql-only/data/user_ids_unique.csv' '-l' (Join-Path $runRoot 'warmup.jtl') |
+Reset-Database -SqlFile "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql"
+& $jmeterBat '-n' '-t' 'benchmark\suites\mysql-only\standard\baseline-throughput.jmx' '-Jthreads=10' '-JrampUpSeconds=2' '-JdurationSeconds=10' '-JuserCsv=benchmark/suites/mysql-only/standard/data/user_ids_unique.csv' '-l' (Join-Path $runRoot 'warmup.jtl') |
     Tee-Object (Join-Path $runRoot 'warmup.console.txt')
 
 if ($Scenario -eq "all") {
-    Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\jmeter\mysql-only\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_small.sql"
-    Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\jmeter\mysql-only\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_repeat.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
+    Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql"
+    Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql"
+    Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql"
+    Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql"
+    Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\suites\mysql-only\standard\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_small.sql"
+    Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\suites\mysql-only\standard\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_repeat.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql"
 } else {
     switch ($Scenario) {
-        "baseline-50" { Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "baseline-100" { Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "baseline-200" { Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "baseline-500" { Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "oversell-100" { Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\jmeter\mysql-only\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_small.sql" }
-        "one-user-one-order-100" { Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\jmeter\mysql-only\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_repeat.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
+        "baseline-50" { Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql" }
+        "baseline-100" { Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql" }
+        "baseline-200" { Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql" }
+        "baseline-500" { Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\suites\mysql-only\standard\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql" }
+        "oversell-100" { Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\suites\mysql-only\standard\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_unique.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_small.sql" }
+        "one-user-one-order-100" { Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\suites\mysql-only\standard\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/suites/mysql-only/standard/data/user_ids_repeat.csv" -ResetSql "benchmark\suites\mysql-only\standard\sql\reset_stock_large.sql" }
     }
 }
 

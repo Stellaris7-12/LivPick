@@ -1,5 +1,6 @@
 # Compiled output
 /target/
+/benchmark/target/
 /build/
 
 # IDE files

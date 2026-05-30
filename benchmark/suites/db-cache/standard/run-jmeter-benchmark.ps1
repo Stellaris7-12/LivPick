@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("flash-burst-5k-100", "flash-burst-5k-500", "flash-sustain-5k-100", "flash-sustain-5k-500", "all")]
+    [ValidateSet("baseline-50", "baseline-100", "baseline-200", "baseline-500", "oversell-100", "one-user-one-order-100", "cache-hit-200", "cache-penetration-200", "cache-breakdown-200", "all")]
     [string]$Scenario = "all",
 
     [Parameter(Mandatory = $false)]
@@ -28,7 +28,10 @@ param(
     [int]$VoucherId = 7,
 
     [Parameter(Mandatory = $false)]
-    [string]$UserCsv = "benchmark/jmeter/db-cache/data/user_ids_unique.csv"
+    [int]$HotShopId = 1,
+
+    [Parameter(Mandatory = $false)]
+    [int]$MissingShopId = 99999999
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,7 +39,6 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 Set-Location $root
 
-$suiteRoot = "benchmark\jmeter\flash-sale\db-cache"
 $jmeterBat = Join-Path $JMeterHome "bin\jmeter.bat"
 if (-not (Test-Path $jmeterBat)) {
     throw "JMeter not found at $jmeterBat"
@@ -52,14 +54,14 @@ if (-not $appConnection) {
 }
 
 $appPid = $appConnection.OwningProcess
-$monitorScript = Join-Path $root "$suiteRoot\collect-runtime-monitor.ps1"
+$monitorScript = Join-Path $root "benchmark\suites\db-cache\standard\collect-runtime-monitor.ps1"
 $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $jstatCommand = Get-Command jstat.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 $jstatPath = if ($jstatCommand) { $jstatCommand.Source } else { "" }
 $env:MYSQL_PWD = "heyunhui2856"
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$runRoot = Join-Path "target\benchmark\jmeter\flash-sale\db-cache" "run-$timestamp"
+$runRoot = Join-Path "target\benchmark\jmeter\db-cache" "run-$timestamp"
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 $aggregate = New-Object System.Collections.Generic.List[object]
@@ -108,6 +110,22 @@ function Reset-BenchmarkMetrics {
     $response = Invoke-AppJson -Method "Post" -Path "/benchmark/admin/metrics/reset"
     if (-not $response.success) {
         throw "Reset benchmark metrics failed: $($response.errorMsg)"
+    }
+}
+
+function Warm-ShopCache {
+    param([int]$ShopId)
+    $response = Invoke-AppJson -Method "Post" -Path "/benchmark/admin/cache/shop/$ShopId/warm"
+    if (-not $response.success) {
+        throw "Warm shop cache failed: $($response.errorMsg)"
+    }
+}
+
+function Expire-ShopCache {
+    param([int]$ShopId)
+    $response = Invoke-AppJson -Method "Post" -Path "/benchmark/admin/cache/shop/$ShopId/expire"
+    if (-not $response.success) {
+        throw "Expire shop cache failed: $($response.errorMsg)"
     }
 }
 
@@ -167,7 +185,9 @@ function Get-DbScalar {
 
 function Reset-Database {
     param([string]$SqlFile)
-
+    if (-not $SqlFile) {
+        return
+    }
     $sql = Get-Content $SqlFile -Raw
     mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb -e $sql 2>$null | Out-Null
 }
@@ -188,56 +208,22 @@ function Reset-RedisState {
     }
 }
 
-function Get-ScenarioDefinition {
+function Get-ScenarioPostCheck {
     param([string]$Name)
 
     switch ($Name) {
-        "flash-burst-5k-100" {
+        "one-user-one-order-100" {
             return @{
-                JmxFile = "$suiteRoot\flash-burst-high-contrast.jmx"
-                Threads = 1000
-                RampUpSeconds = 3
-                DurationSeconds = 10
-                ResetSql = "$suiteRoot\sql\reset_stock_flash_100.sql"
+                Sql = "SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS duplicate_user_rows FROM (SELECT user_id FROM tb_voucher_order WHERE voucher_id = $VoucherId GROUP BY user_id HAVING COUNT(*) > 1) t;"
+                Type = "duplicate"
             }
         }
-        "flash-burst-5k-500" {
-            return @{
-                JmxFile = "$suiteRoot\flash-burst-high-contrast.jmx"
-                Threads = 1000
-                RampUpSeconds = 3
-                DurationSeconds = 10
-                ResetSql = "$suiteRoot\sql\reset_stock_flash_500.sql"
-            }
-        }
-        "flash-sustain-5k-100" {
-            return @{
-                JmxFile = "$suiteRoot\flash-sustain-high-contrast.jmx"
-                Threads = 500
-                RampUpSeconds = 5
-                DurationSeconds = 60
-                ResetSql = "$suiteRoot\sql\reset_stock_flash_100.sql"
-            }
-        }
-        "flash-sustain-5k-500" {
-            return @{
-                JmxFile = "$suiteRoot\flash-sustain-high-contrast.jmx"
-                Threads = 500
-                RampUpSeconds = 5
-                DurationSeconds = 60
-                ResetSql = "$suiteRoot\sql\reset_stock_flash_500.sql"
-            }
-        }
-        default {
-            throw "Unsupported scenario: $Name"
-        }
-    }
-}
-
-function Get-ScenarioPostCheck {
-    return @{
-        Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"
-        Type = "stock"
+        "baseline-50" { return @{ Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"; Type = "stock" } }
+        "baseline-100" { return @{ Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"; Type = "stock" } }
+        "baseline-200" { return @{ Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"; Type = "stock" } }
+        "baseline-500" { return @{ Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"; Type = "stock" } }
+        "oversell-100" { return @{ Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"; Type = "stock" } }
+        default { return $null }
     }
 }
 
@@ -275,6 +261,7 @@ function Parse-JtlSummary {
         FailureBuckets = ($failureBuckets -join "; ")
         FinalStock = ""
         FinalOrders = ""
+        DuplicateUsers = ""
         CacheHit = ""
         NullHit = ""
         CacheMiss = ""
@@ -303,12 +290,20 @@ function Get-MySqlStatusSnapshot {
 function Add-PostCheckFields {
     param(
         [pscustomobject]$Summary,
-        [string[]]$DbOutput
+        [string[]]$DbOutput,
+        [string]$Type
     )
 
     $numericLines = $DbOutput | Select-String '^([0-9]+)$'
-    $Summary.FinalStock = (($numericLines | Select-Object -First 1).Matches.Value)
-    $Summary.FinalOrders = (($numericLines | Select-Object -Skip 1 -First 1).Matches.Value)
+    if ($Type -eq "stock") {
+        $Summary.FinalStock = (($numericLines | Select-Object -First 1).Matches.Value)
+        $Summary.FinalOrders = (($numericLines | Select-Object -Skip 1 -First 1).Matches.Value)
+        $Summary.DuplicateUsers = ""
+    } elseif ($Type -eq "duplicate") {
+        $Summary.FinalStock = ""
+        $Summary.FinalOrders = (($numericLines | Select-Object -First 1).Matches.Value)
+        $Summary.DuplicateUsers = (($numericLines | Select-Object -Skip 1 -First 1).Matches.Value)
+    }
 }
 
 function Add-BenchmarkMetricFields {
@@ -427,7 +422,7 @@ function Export-MySqlDiagnostics {
 SELECT DIGEST_TEXT, COUNT_STAR, ROUND(SUM_TIMER_WAIT/1000000000000,2) AS total_seconds, ROUND(AVG_TIMER_WAIT/1000000000,3) AS avg_ms, FIRST_SEEN, LAST_SEEN
 FROM performance_schema.events_statements_summary_by_digest
 WHERE LAST_SEEN BETWEEN '$startText' AND '$endText'
-  AND (DIGEST_TEXT LIKE '%tb_seckill_voucher%' OR DIGEST_TEXT LIKE '%tb_voucher_order%')
+  AND (DIGEST_TEXT LIKE '%tb_seckill_voucher%' OR DIGEST_TEXT LIKE '%tb_voucher_order%' OR DIGEST_TEXT LIKE '%tb_shop%')
 ORDER BY SUM_TIMER_WAIT DESC
 LIMIT 10;
 "@
@@ -498,18 +493,68 @@ function Stop-MonitorProcess {
 }
 
 function Prepare-Scenario {
-    param([hashtable]$Definition)
+    param([string]$Name)
 
-    Reset-Database -SqlFile $Definition.ResetSql
-    Reset-RedisState
-    Reset-BenchmarkMetrics
+    switch ($Name) {
+        "baseline-50" {
+            Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_large.sql"
+            Reset-RedisState
+            Reset-BenchmarkMetrics
+        }
+        "baseline-100" {
+            Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_large.sql"
+            Reset-RedisState
+            Reset-BenchmarkMetrics
+        }
+        "baseline-200" {
+            Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_large.sql"
+            Reset-RedisState
+            Reset-BenchmarkMetrics
+        }
+        "baseline-500" {
+            Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_large.sql"
+            Reset-RedisState
+            Reset-BenchmarkMetrics
+        }
+        "oversell-100" {
+            Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_small.sql"
+            Reset-RedisState
+            Reset-BenchmarkMetrics
+        }
+        "one-user-one-order-100" {
+            Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_large.sql"
+            Reset-RedisState
+            Reset-BenchmarkMetrics
+        }
+        "cache-hit-200" {
+            Clear-RedisPattern -Pattern "cache:shop:*"
+            Reset-BenchmarkMetrics
+            Warm-ShopCache -ShopId $HotShopId
+            Reset-BenchmarkMetrics
+        }
+        "cache-penetration-200" {
+            Clear-RedisPattern -Pattern "cache:shop:*"
+            Reset-BenchmarkMetrics
+        }
+        "cache-breakdown-200" {
+            Clear-RedisPattern -Pattern "cache:shop:*"
+            Warm-ShopCache -ShopId $HotShopId
+            Expire-ShopCache -ShopId $HotShopId
+            Reset-BenchmarkMetrics
+        }
+    }
 }
 
 function Invoke-Scenario {
-    param([string]$Name)
+    param(
+        [string]$Name,
+        [string]$JmxFile,
+        [int]$Threads,
+        [string]$CsvFile = "",
+        [int]$ShopId = 0
+    )
 
-    $definition = Get-ScenarioDefinition -Name $Name
-    Prepare-Scenario -Definition $definition
+    Prepare-Scenario -Name $Name
 
     $scenarioDir = Join-Path $runRoot $Name
     $dashboardDir = Join-Path $scenarioDir "dashboard"
@@ -532,21 +577,25 @@ function Invoke-Scenario {
         }
 
         $jmeterArgs = @(
-            "-n",
-            "-t", $definition.JmxFile,
+            '-n',
+            '-t', $JmxFile,
             "-Jhost=$appHost",
             "-Jport=$appPort",
             "-Jprotocol=$appProtocol",
-            "-JvoucherId=$VoucherId",
-            "-Jthreads=$($definition.Threads)",
-            "-JrampUpSeconds=$($definition.RampUpSeconds)",
-            "-JdurationSeconds=$($definition.DurationSeconds)",
-            "-JuserCsv=$UserCsv",
-            "-l", $jtl,
-            "-e",
-            "-o", $dashboardDir
+            "-Jthreads=$Threads",
+            '-JrampUpSeconds=5',
+            '-JdurationSeconds=60',
+            '-l', $jtl,
+            '-e',
+            '-o', $dashboardDir
         )
 
+        if ($CsvFile) {
+            $jmeterArgs += "-JuserCsv=$CsvFile"
+        }
+        if ($ShopId -gt 0) {
+            $jmeterArgs += "-JshopId=$ShopId"
+        }
         & $jmeterBat @jmeterArgs | Tee-Object $console
     } finally {
         $scenarioEnd = Get-Date
@@ -570,10 +619,12 @@ function Invoke-Scenario {
     $summary = Parse-JtlSummary -JtlPath $jtl -ScenarioName $Name
     Add-BenchmarkMetricFields -Summary $summary -MetricDelta $metricDelta
 
-    $postCheck = Get-ScenarioPostCheck
-    $dbOutput = mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb -e $postCheck.Sql 2>$null
-    $dbOutput | Set-Content -Encoding UTF8 $dbCheck
-    Add-PostCheckFields -Summary $summary -DbOutput $dbOutput
+    $postCheck = Get-ScenarioPostCheck -Name $Name
+    if ($postCheck) {
+        $dbOutput = mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb -e $postCheck.Sql 2>$null
+        $dbOutput | Set-Content -Encoding UTF8 $dbCheck
+        Add-PostCheckFields -Summary $summary -DbOutput $dbOutput -Type $postCheck.Type
+    }
 
     if ($EnableMonitoring) {
         Add-MonitoringSummary -Summary $summary -ScenarioDir $scenarioDir -StartStatus $statusStart -EndStatus $statusEnd
@@ -583,21 +634,34 @@ function Invoke-Scenario {
     $summary | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $scenarioDir "$Name.summary.json")
 }
 
-$warmupSql = "$suiteRoot\sql\reset_stock_flash_500.sql"
-Reset-Database -SqlFile $warmupSql
+Reset-Database -SqlFile "benchmark\suites\db-cache\standard\sql\reset_stock_large.sql"
 Reset-RedisState
-Reset-BenchmarkMetrics
-& $jmeterBat "-n" "-t" "$suiteRoot\flash-burst-high-contrast.jmx" "-Jhost=$appHost" "-Jport=$appPort" "-Jprotocol=$appProtocol" "-JvoucherId=$VoucherId" "-Jthreads=10" "-JrampUpSeconds=2" "-JdurationSeconds=5" "-JuserCsv=$UserCsv" "-l" (Join-Path $runRoot "warmup.jtl") |
-    Tee-Object (Join-Path $runRoot "warmup.console.txt")
+& $jmeterBat '-n' '-t' 'benchmark\suites\db-cache\standard\baseline-throughput.jmx' '-Jthreads=10' '-JrampUpSeconds=2' '-JdurationSeconds=10' '-JuserCsv=benchmark/suites/db-cache/standard/data/user_ids_unique.csv' '-l' (Join-Path $runRoot 'warmup.jtl') |
+    Tee-Object (Join-Path $runRoot 'warmup.console.txt')
 
 if ($Scenario -eq "all") {
-    Invoke-Scenario -Name "flash-burst-5k-100"
-    Invoke-Scenario -Name "flash-burst-5k-500"
-    Invoke-Scenario -Name "flash-sustain-5k-100"
-    Invoke-Scenario -Name "flash-sustain-5k-500"
+    Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv"
+    Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv"
+    Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv"
+    Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv"
+    Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\suites\db-cache\standard\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv"
+    Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\suites\db-cache\standard\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_repeat.csv"
+    Invoke-Scenario -Name "cache-hit-200" -JmxFile "benchmark\suites\db-cache\standard\cache-hit.jmx" -Threads 200 -ShopId $HotShopId
+    Invoke-Scenario -Name "cache-penetration-200" -JmxFile "benchmark\suites\db-cache\standard\cache-penetration.jmx" -Threads 200 -ShopId $MissingShopId
+    Invoke-Scenario -Name "cache-breakdown-200" -JmxFile "benchmark\suites\db-cache\standard\cache-breakdown.jmx" -Threads 200 -ShopId $HotShopId
 } else {
-    Invoke-Scenario -Name $Scenario
+    switch ($Scenario) {
+        "baseline-50" { Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv" }
+        "baseline-100" { Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv" }
+        "baseline-200" { Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv" }
+        "baseline-500" { Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\suites\db-cache\standard\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv" }
+        "oversell-100" { Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\suites\db-cache\standard\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_unique.csv" }
+        "one-user-one-order-100" { Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\suites\db-cache\standard\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/suites/db-cache/standard/data/user_ids_repeat.csv" }
+        "cache-hit-200" { Invoke-Scenario -Name "cache-hit-200" -JmxFile "benchmark\suites\db-cache\standard\cache-hit.jmx" -Threads 200 -ShopId $HotShopId }
+        "cache-penetration-200" { Invoke-Scenario -Name "cache-penetration-200" -JmxFile "benchmark\suites\db-cache\standard\cache-penetration.jmx" -Threads 200 -ShopId $MissingShopId }
+        "cache-breakdown-200" { Invoke-Scenario -Name "cache-breakdown-200" -JmxFile "benchmark\suites\db-cache\standard\cache-breakdown.jmx" -Threads 200 -ShopId $HotShopId }
+    }
 }
 
 $aggregate | Export-Csv -NoTypeInformation -Encoding UTF8 (Join-Path $runRoot "aggregate-summary.csv")
-Write-Host "DB-cache flash-sale benchmark results saved to $runRoot"
+Write-Host "DB-cache JMeter benchmark results saved to $runRoot"

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("baseline-50", "baseline-100", "baseline-200", "baseline-500", "oversell-100", "one-user-one-order-100", "all")]
+    [ValidateSet("flash-burst-5k-100", "flash-burst-5k-500", "flash-sustain-5k-100", "flash-sustain-5k-500", "all")]
     [string]$Scenario = "all",
 
     [Parameter(Mandatory = $false)]
@@ -10,36 +10,61 @@ param(
     [switch]$EnableMonitoring,
 
     [Parameter(Mandatory = $false)]
-    [int]$SamplingIntervalSeconds = 2
+    [int]$SamplingIntervalSeconds = 2,
+
+    [Parameter(Mandatory = $false)]
+    [string]$MySqlDb = "livpick_mysql_only",
+
+    [Parameter(Mandatory = $false)]
+    [string]$AppBaseUrl = "http://127.0.0.1:8081",
+
+    [Parameter(Mandatory = $false)]
+    [int]$VoucherId = 7,
+
+    [Parameter(Mandatory = $false)]
+    [string]$UserCsv = "benchmark-final/suites/mysql-only/standard/data/user_ids_unique.csv"
 )
 
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 Set-Location $root
 
+$suiteRoot = "benchmark-final\suites\mysql-only\flash-sale"
 $jmeterBat = Join-Path $JMeterHome "bin\jmeter.bat"
 if (-not (Test-Path $jmeterBat)) {
     throw "JMeter not found at $jmeterBat"
 }
 
-$appConnection = Get-NetTCPConnection -LocalPort 8081 -ErrorAction SilentlyContinue | Select-Object -First 1
+$appUri = [Uri]$AppBaseUrl
+$appPort = $appUri.Port
+$appHost = $appUri.Host
+$appProtocol = $appUri.Scheme
+$appConnection = Get-NetTCPConnection -LocalPort $appPort -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $appConnection) {
-    throw "Application is not listening on port 8081"
+    throw "Application is not listening on port $appPort"
 }
 
 $appPid = $appConnection.OwningProcess
-$monitorScript = Join-Path $root "benchmark\jmeter\mysql-only\collect-runtime-monitor.ps1"
+$monitorScript = Join-Path $root "benchmark-final\suites\mysql-only\standard\collect-runtime-monitor.ps1"
 $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $jstatCommand = Get-Command jstat.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 $jstatPath = if ($jstatCommand) { $jstatCommand.Source } else { "" }
 $env:MYSQL_PWD = "heyunhui2856"
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$runRoot = Join-Path "target\benchmark\jmeter" "run-$timestamp"
+$runRoot = Join-Path "target\benchmark\jmeter\flash-sale\mysql-only" "run-$timestamp"
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 $aggregate = New-Object System.Collections.Generic.List[object]
+
+function Convert-ToDouble {
+    param([object]$Value)
+    if ($null -eq $Value -or "$Value" -eq "") {
+        return 0.0
+    }
+    return [double]::Parse("$Value", [System.Globalization.CultureInfo]::InvariantCulture)
+}
 
 function Get-PercentileValue {
     param(
@@ -56,35 +81,74 @@ function Get-PercentileValue {
     return [int]$sorted[$index]
 }
 
-function Convert-ToDouble {
-    param([object]$Value)
-    if ($null -eq $Value -or "$Value" -eq "") {
-        return 0.0
+function Get-DbScalar {
+    param([string]$Sql)
+
+    $result = mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb --batch --raw --skip-column-names -e $Sql 2>$null
+    $value = ($result | Select-Object -First 1)
+    if ($null -eq $value) {
+        return ""
     }
-    return [double]::Parse("$Value", [System.Globalization.CultureInfo]::InvariantCulture)
+    return "$value".Trim()
 }
 
 function Reset-Database {
     param([string]$SqlFile)
+
     $sql = Get-Content $SqlFile -Raw
-    mysql -h 127.0.0.1 -P 3306 -u root -D livpick_mysql_only -e $sql 2>$null | Out-Null
+    mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb -e $sql 2>$null | Out-Null
 }
 
-function Get-ScenarioPostCheck {
+function Get-ScenarioDefinition {
     param([string]$Name)
+
     switch ($Name) {
-        "one-user-one-order-100" {
+        "flash-burst-5k-100" {
             return @{
-                Sql = "SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = 7; SELECT COUNT(*) AS duplicate_user_rows FROM (SELECT user_id FROM tb_voucher_order WHERE voucher_id = 7 GROUP BY user_id HAVING COUNT(*) > 1) t;"
-                Type = "duplicate"
+                JmxFile = "$suiteRoot\flash-burst-high-contrast.jmx"
+                Threads = 1000
+                RampUpSeconds = 3
+                DurationSeconds = 10
+                ResetSql = "$suiteRoot\sql\reset_stock_flash_100.sql"
+            }
+        }
+        "flash-burst-5k-500" {
+            return @{
+                JmxFile = "$suiteRoot\flash-burst-high-contrast.jmx"
+                Threads = 1000
+                RampUpSeconds = 3
+                DurationSeconds = 10
+                ResetSql = "$suiteRoot\sql\reset_stock_flash_500.sql"
+            }
+        }
+        "flash-sustain-5k-100" {
+            return @{
+                JmxFile = "$suiteRoot\flash-sustain-high-contrast.jmx"
+                Threads = 500
+                RampUpSeconds = 5
+                DurationSeconds = 60
+                ResetSql = "$suiteRoot\sql\reset_stock_flash_100.sql"
+            }
+        }
+        "flash-sustain-5k-500" {
+            return @{
+                JmxFile = "$suiteRoot\flash-sustain-high-contrast.jmx"
+                Threads = 500
+                RampUpSeconds = 5
+                DurationSeconds = 60
+                ResetSql = "$suiteRoot\sql\reset_stock_flash_500.sql"
             }
         }
         default {
-            return @{
-                Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = 7; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = 7;"
-                Type = "stock"
-            }
+            throw "Unsupported scenario: $Name"
         }
+    }
+}
+
+function Get-ScenarioPostCheck {
+    return @{
+        Sql = "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId; SELECT COUNT(*) AS order_count FROM tb_voucher_order WHERE voucher_id = $VoucherId;"
+        Type = "stock"
     }
 }
 
@@ -120,6 +184,8 @@ function Parse-JtlSummary {
         MaxMs = [int](($elapsedValues | Measure-Object -Maximum).Maximum)
         ErrorPercent = if ($samples -eq 0) { 0 } else { [math]::Round(($failureRows.Count * 100.0) / $samples, 2) }
         FailureBuckets = ($failureBuckets -join "; ")
+        FinalStock = ""
+        FinalOrders = ""
     }
 }
 
@@ -138,20 +204,12 @@ function Get-MySqlStatusSnapshot {
 function Add-PostCheckFields {
     param(
         [pscustomobject]$Summary,
-        [string[]]$DbOutput,
-        [string]$Type
+        [string[]]$DbOutput
     )
 
     $numericLines = $DbOutput | Select-String '^([0-9]+)$'
-    if ($Type -eq "stock") {
-        $Summary | Add-Member -NotePropertyName FinalStock -NotePropertyValue (($numericLines | Select-Object -First 1).Matches.Value)
-        $Summary | Add-Member -NotePropertyName FinalOrders -NotePropertyValue (($numericLines | Select-Object -Skip 1 -First 1).Matches.Value)
-        $Summary | Add-Member -NotePropertyName DuplicateUsers -NotePropertyValue ""
-    } else {
-        $Summary | Add-Member -NotePropertyName FinalStock -NotePropertyValue ""
-        $Summary | Add-Member -NotePropertyName FinalOrders -NotePropertyValue (($numericLines | Select-Object -First 1).Matches.Value)
-        $Summary | Add-Member -NotePropertyName DuplicateUsers -NotePropertyValue (($numericLines | Select-Object -Skip 1 -First 1).Matches.Value)
-    }
+    $Summary.FinalStock = (($numericLines | Select-Object -First 1).Matches.Value)
+    $Summary.FinalOrders = (($numericLines | Select-Object -Skip 1 -First 1).Matches.Value)
 }
 
 function Add-MonitoringSummary {
@@ -238,7 +296,7 @@ LIMIT 10;
 
 SELECT OBJECT_SCHEMA, OBJECT_NAME, COUNT_STAR, ROUND(SUM_TIMER_WAIT/1000000000000,2) AS total_seconds
 FROM performance_schema.table_lock_waits_summary_by_table
-WHERE OBJECT_SCHEMA = 'livpick_mysql_only'
+WHERE OBJECT_SCHEMA = '$MySqlDb'
 ORDER BY SUM_TIMER_WAIT DESC
 LIMIT 10;
 
@@ -294,16 +352,17 @@ function Stop-MonitorProcess {
     }
 }
 
-function Invoke-Scenario {
-    param(
-        [string]$Name,
-        [string]$JmxFile,
-        [int]$Threads,
-        [string]$CsvFile,
-        [string]$ResetSql
-    )
+function Prepare-Scenario {
+    param([hashtable]$Definition)
 
-    Reset-Database -SqlFile $ResetSql
+    Reset-Database -SqlFile $Definition.ResetSql
+}
+
+function Invoke-Scenario {
+    param([string]$Name)
+
+    $definition = Get-ScenarioDefinition -Name $Name
+    Prepare-Scenario -Definition $definition
 
     $scenarioDir = Join-Path $runRoot $Name
     $dashboardDir = Join-Path $scenarioDir "dashboard"
@@ -324,8 +383,23 @@ function Invoke-Scenario {
             $monitor = Start-MonitorProcess -ScenarioDir $scenarioDir
         }
 
-        & $jmeterBat '-n' '-t' $JmxFile "-Jthreads=$Threads" '-JrampUpSeconds=5' '-JdurationSeconds=60' "-JuserCsv=$CsvFile" '-l' $jtl '-e' '-o' $dashboardDir |
-            Tee-Object $console
+        $jmeterArgs = @(
+            "-n",
+            "-t", $definition.JmxFile,
+            "-Jhost=$appHost",
+            "-Jport=$appPort",
+            "-Jprotocol=$appProtocol",
+            "-JvoucherId=$VoucherId",
+            "-Jthreads=$($definition.Threads)",
+            "-JrampUpSeconds=$($definition.RampUpSeconds)",
+            "-JdurationSeconds=$($definition.DurationSeconds)",
+            "-JuserCsv=$UserCsv",
+            "-l", $jtl,
+            "-e",
+            "-o", $dashboardDir
+        )
+
+        & $jmeterBat @jmeterArgs | Tee-Object $console
     } finally {
         $scenarioEnd = Get-Date
         if ($EnableMonitoring) {
@@ -337,10 +411,10 @@ function Invoke-Scenario {
 
     $summary = Parse-JtlSummary -JtlPath $jtl -ScenarioName $Name
 
-    $postCheck = Get-ScenarioPostCheck -Name $Name
-    $dbOutput = mysql -h 127.0.0.1 -P 3306 -u root -D livpick_mysql_only -e $postCheck.Sql 2>$null
+    $postCheck = Get-ScenarioPostCheck
+    $dbOutput = mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb -e $postCheck.Sql 2>$null
     $dbOutput | Set-Content -Encoding UTF8 $dbCheck
-    Add-PostCheckFields -Summary $summary -DbOutput $dbOutput -Type $postCheck.Type
+    Add-PostCheckFields -Summary $summary -DbOutput $dbOutput
 
     if ($EnableMonitoring) {
         Add-MonitoringSummary -Summary $summary -ScenarioDir $scenarioDir -StartStatus $statusStart -EndStatus $statusEnd
@@ -350,27 +424,19 @@ function Invoke-Scenario {
     $summary | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $scenarioDir "$Name.summary.json")
 }
 
-Reset-Database -SqlFile "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-& $jmeterBat '-n' '-t' 'benchmark\jmeter\mysql-only\baseline-throughput.jmx' '-Jthreads=10' '-JrampUpSeconds=2' '-JdurationSeconds=10' '-JuserCsv=benchmark/jmeter/mysql-only/data/user_ids_unique.csv' '-l' (Join-Path $runRoot 'warmup.jtl') |
-    Tee-Object (Join-Path $runRoot 'warmup.console.txt')
+$warmupSql = "$suiteRoot\sql\reset_stock_flash_500.sql"
+Reset-Database -SqlFile $warmupSql
+& $jmeterBat "-n" "-t" "$suiteRoot\flash-burst-high-contrast.jmx" "-Jhost=$appHost" "-Jport=$appPort" "-Jprotocol=$appProtocol" "-JvoucherId=$VoucherId" "-Jthreads=10" "-JrampUpSeconds=2" "-JdurationSeconds=5" "-JuserCsv=$UserCsv" "-l" (Join-Path $runRoot "warmup.jtl") |
+    Tee-Object (Join-Path $runRoot "warmup.console.txt")
 
 if ($Scenario -eq "all") {
-    Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
-    Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\jmeter\mysql-only\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_small.sql"
-    Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\jmeter\mysql-only\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_repeat.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql"
+    Invoke-Scenario -Name "flash-burst-5k-100"
+    Invoke-Scenario -Name "flash-burst-5k-500"
+    Invoke-Scenario -Name "flash-sustain-5k-100"
+    Invoke-Scenario -Name "flash-sustain-5k-500"
 } else {
-    switch ($Scenario) {
-        "baseline-50" { Invoke-Scenario -Name "baseline-50" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 50 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "baseline-100" { Invoke-Scenario -Name "baseline-100" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "baseline-200" { Invoke-Scenario -Name "baseline-200" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 200 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "baseline-500" { Invoke-Scenario -Name "baseline-500" -JmxFile "benchmark\jmeter\mysql-only\baseline-throughput.jmx" -Threads 500 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-        "oversell-100" { Invoke-Scenario -Name "oversell-100" -JmxFile "benchmark\jmeter\mysql-only\oversell-check.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_unique.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_small.sql" }
-        "one-user-one-order-100" { Invoke-Scenario -Name "one-user-one-order-100" -JmxFile "benchmark\jmeter\mysql-only\one-user-one-order.jmx" -Threads 100 -CsvFile "benchmark/jmeter/mysql-only/data/user_ids_repeat.csv" -ResetSql "benchmark\jmeter\mysql-only\sql\reset_stock_large.sql" }
-    }
+    Invoke-Scenario -Name $Scenario
 }
 
 $aggregate | Export-Csv -NoTypeInformation -Encoding UTF8 (Join-Path $runRoot "aggregate-summary.csv")
-Write-Host "JMeter benchmark results saved to $runRoot"
+Write-Host "MySQL-only flash-sale benchmark results saved to $runRoot"

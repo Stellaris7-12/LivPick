@@ -27,10 +27,10 @@
 
 ## 2. 去哪里看
 
-如果你要复跑或看结果，只看这两个文件：
+如果你要复跑或看结果，优先看这两个文件：
 
-- 压测说明：[benchmark/jmeter/mysql-only/README.md](C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/mysql-only/README.md:1)
-- 最终报告：[mysql-only-benchmark-report.md](C:/Users/heyunhui/IdeaProjects/LivPick/benchmark/jmeter/mysql-only/report/mysql-only-benchmark-report.md:1)
+- 压测总览：[benchmark-final/README.md](C:/Users/heyunhui/IdeaProjects/LivPick/benchmark-final/README.md:1)
+- MySQL-only 专题报告：[mysql-only.md](C:/Users/heyunhui/IdeaProjects/LivPick/benchmark-final/reports/mysql-only.md:1)
 
 ## 3. 一句话结论
 

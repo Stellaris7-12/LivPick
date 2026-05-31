@@ -4,6 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.livepick.config.LivPickProperties;
 import com.livepick.mq.message.PendingSeckillOrderMessage;
 import com.livepick.mq.message.SeckillOrderMessage;
+import com.livepick.service.benchmark.BenchmarkMetricsService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -22,6 +23,7 @@ public class SeckillPendingSendService {
 
     private final StringRedisTemplate stringRedisTemplate;
     private final LivPickProperties livPickProperties;
+    private final BenchmarkMetricsService benchmarkMetricsService;
 
     public void register(SeckillOrderMessage message) {
         PendingSeckillOrderMessage pendingMessage = new PendingSeckillOrderMessage();
@@ -32,6 +34,7 @@ public class SeckillPendingSendService {
         pendingMessage.setRetryCount(0);
         pendingMessage.setNextRetryAt(System.currentTimeMillis() + livPickProperties.getSeckill().getPendingSendRetryDelayMs());
         save(pendingMessage);
+        benchmarkMetricsService.incrementPendingRegistered();
     }
 
     public void save(PendingSeckillOrderMessage pendingMessage) {

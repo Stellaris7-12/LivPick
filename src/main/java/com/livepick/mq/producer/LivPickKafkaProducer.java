@@ -4,6 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.livepick.config.LivPickProperties;
 import com.livepick.mq.message.CacheDeleteRetryMessage;
 import com.livepick.mq.message.SeckillOrderMessage;
+import com.livepick.service.benchmark.BenchmarkMetricsService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
@@ -18,15 +19,22 @@ public class LivPickKafkaProducer {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final LivPickProperties livPickProperties;
+    private final BenchmarkMetricsService benchmarkMetricsService;
 
     public void sendSeckillOrder(SeckillOrderMessage message)
             throws ExecutionException, InterruptedException, TimeoutException {
-        kafkaTemplate.send(
-                        livPickProperties.getKafka().getSeckillOrderTopic(),
-                        String.valueOf(message.getOrderId()),
-                        JSONUtil.toJsonStr(message)
-                )
-                .get(5, TimeUnit.SECONDS);
+        try {
+            kafkaTemplate.send(
+                            livPickProperties.getKafka().getSeckillOrderTopic(),
+                            String.valueOf(message.getOrderId()),
+                            JSONUtil.toJsonStr(message)
+                    )
+                    .get(5, TimeUnit.SECONDS);
+            benchmarkMetricsService.incrementKafkaSendSuccess();
+        } catch (ExecutionException | InterruptedException | TimeoutException e) {
+            benchmarkMetricsService.incrementKafkaSendFailure();
+            throw e;
+        }
     }
 
     public void sendCacheDeleteRetry(CacheDeleteRetryMessage message)

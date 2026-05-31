@@ -1,10 +1,13 @@
--- 1. 参数列表
 local voucherId = ARGV[1]
+local userId = ARGV[2]
+local orderId = ARGV[3]
 
--- 2. 数据key
 local stockKey = 'seckill:stock:' .. voucherId
+local orderKey = 'seckill:order:' .. voucherId
+local reorderKey = 'seckill:reorder:' .. voucherId .. ':' .. userId
 
--- 3. 仅回补库存，不恢复用户抢购资格
 redis.call('incrby', stockKey, 1)
+redis.call('srem', orderKey, userId)
+redis.call('set', reorderKey, orderId)
 
 return 0

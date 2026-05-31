@@ -12,6 +12,7 @@ public class LivPickProperties {
     private Order order = new Order();
     private Cache cache = new Cache();
     private Bloom bloom = new Bloom();
+    private Benchmark benchmark = new Benchmark();
 
     @Data
     public static class Kafka {
@@ -53,5 +54,11 @@ public class LivPickProperties {
         private String shopFilterName = "bf:shop:id";
         private long expectedInsertions = 100_000L;
         private double falseProbability = 0.03D;
+    }
+
+    @Data
+    public static class Benchmark {
+        private boolean enabled = false;
+        private boolean skipLoginCheck = false;
     }
 }

@@ -3,6 +3,7 @@ package com.livepick.mq.consumer;
 import cn.hutool.json.JSONUtil;
 import com.livepick.mq.message.SeckillOrderMessage;
 import com.livepick.service.IVoucherOrderService;
+import com.livepick.service.benchmark.BenchmarkMetricsService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -20,6 +21,9 @@ class SeckillOrderConsumerTest {
 
     @Mock
     private IVoucherOrderService voucherOrderService;
+
+    @Mock
+    private BenchmarkMetricsService benchmarkMetricsService;
 
     @InjectMocks
     private SeckillOrderConsumer seckillOrderConsumer;

@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import static com.livepick.utils.RedisConstants.LOGIN_USER_KEY;
 import static com.livepick.utils.RedisConstants.LOGIN_USER_TTL;
 import static com.livepick.utils.RedisConstants.SECKILL_ORDER_KEY;
+import static com.livepick.utils.RedisConstants.SECKILL_REORDER_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_STOCK_KEY;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -106,6 +107,15 @@ public abstract class ApiTestSupport {
 
     protected void clearSeckillReservation(Long voucherId, Long userId) {
         stringRedisTemplate.opsForSet().remove(SECKILL_ORDER_KEY + voucherId, String.valueOf(userId));
+        stringRedisTemplate.delete(SECKILL_REORDER_KEY + voucherId + ":" + userId);
+    }
+
+    protected VoucherOrder createCancelledOrderFixture(Long voucherId, Long userId) {
+        VoucherOrder order = createUnpaidOrderFixture(voucherId, userId);
+        order.setStatus(OrderStatusConstants.CANCELLED);
+        order.setRefundTime(LocalDateTime.now());
+        voucherOrderMapper.updateById(order);
+        return order;
     }
 
     protected void registerCleanupKey(String key) {

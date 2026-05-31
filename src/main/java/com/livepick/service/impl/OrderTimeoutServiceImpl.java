@@ -8,6 +8,7 @@ import com.livepick.mapper.VoucherOrderMapper;
 import com.livepick.service.IOrderTimeoutService;
 import com.livepick.service.ISeckillVoucherService;
 import com.livepick.service.SeckillReservationService;
+import com.livepick.service.benchmark.BenchmarkMetricsService;
 import com.livepick.utils.OrderStatusConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,6 +27,7 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
     private final ISeckillVoucherService seckillVoucherService;
     private final LivPickProperties livPickProperties;
     private final SeckillReservationService seckillReservationService;
+    private final BenchmarkMetricsService benchmarkMetricsService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -51,7 +53,12 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
                 .setSql("stock = stock + 1")
                 .eq("voucher_id", order.getVoucherId())
                 .update();
-        seckillReservationService.rollbackStockAfterTimeoutCancel(order.getVoucherId());
+        seckillReservationService.rollbackReservationAfterTimeoutCancel(
+                order.getVoucherId(),
+                order.getUserId(),
+                order.getId()
+        );
+        benchmarkMetricsService.incrementTimeoutClosed();
         return true;
     }
 

@@ -13,6 +13,7 @@ import com.livepick.service.ISeckillVoucherService;
 import com.livepick.service.IVoucherOrderService;
 import com.livepick.service.SeckillPendingSendService;
 import com.livepick.service.SeckillReservationService;
+import com.livepick.service.benchmark.BenchmarkMetricsService;
 import com.livepick.utils.OrderStatusConstants;
 import com.livepick.utils.RedisIdWorker;
 import com.livepick.utils.UserHolder;
@@ -26,7 +27,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
@@ -55,11 +55,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private final LivPickProperties livPickProperties;
     private final SeckillReservationService seckillReservationService;
     private final SeckillPendingSendService seckillPendingSendService;
+    private final BenchmarkMetricsService benchmarkMetricsService;
 
     @Override
     public Result seckillVoucher(Long voucherId) {
         Long userId = UserHolder.getUser().getId();
-        long orderId = redisIdWorker.nextId("order");
+        Long reusableOrderId = seckillReservationService.getReusableOrderId(voucherId, userId);
+        long orderId = reusableOrderId != null ? reusableOrderId : redisIdWorker.nextId("order");
         Long result = stringRedisTemplate.execute(
                 SECKILL_SCRIPT,
                 Collections.emptyList(),
@@ -67,8 +69,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         );
         int executeResult = result == null ? -1 : result.intValue();
         if (executeResult != 0) {
+            if (executeResult == 1) {
+                benchmarkMetricsService.incrementLuaStockRejected();
+            } else if (executeResult == 2) {
+                benchmarkMetricsService.incrementLuaDuplicateRejected();
+            }
             return Result.fail(executeResult == 1 ? "库存不足" : "不能重复下单");
         }
+        benchmarkMetricsService.incrementApiAccepted();
 
         SeckillOrderMessage message = new SeckillOrderMessage();
         message.setOrderId(orderId);
@@ -101,38 +109,37 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         RLock redisLock = redissonClient.getLock(LOCK_ORDER_KEY + userId);
         boolean isLock = redisLock.tryLock();
         if (!isLock) {
+            benchmarkMetricsService.incrementConsumerDuplicate();
             log.warn("skip duplicated consume request, orderId={}, userId={}, voucherId={}, failureStage=acquireLock",
                     message.getOrderId(), userId, voucherId);
             return;
         }
 
         try {
-            int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
-            if (count > 0) {
-                log.info("skip duplicated order consume, orderId={}, userId={}, voucherId={}, failureStage=duplicateQuery",
-                        message.getOrderId(), userId, voucherId);
+            VoucherOrder existingOrder = query()
+                    .eq("user_id", userId)
+                    .eq("voucher_id", voucherId)
+                    .one();
+            if (existingOrder != null) {
+                handleExistingOrder(message, existingOrder);
                 return;
             }
 
-            boolean stockUpdated = seckillVoucherService.update()
-                    .setSql("stock = stock - 1")
-                    .eq("voucher_id", voucherId)
-                    .gt("stock", 0)
-                    .update();
-            if (!stockUpdated) {
+            if (!deductDbStock(voucherId)) {
                 seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
                 log.warn("db stock insufficient after kafka consume, orderId={}, userId={}, voucherId={}, failureStage=deductDbStock",
                         message.getOrderId(), userId, voucherId);
                 return;
             }
 
+            LocalDateTime createTime = resolveCreateTime(message);
             VoucherOrder voucherOrder = new VoucherOrder();
             voucherOrder.setId(message.getOrderId());
             voucherOrder.setUserId(userId);
             voucherOrder.setVoucherId(voucherId);
             voucherOrder.setPayType(1);
             voucherOrder.setStatus(OrderStatusConstants.UNPAID);
-            voucherOrder.setCreateTime(message.getCreateTime() == null ? LocalDateTime.now() : message.getCreateTime());
+            voucherOrder.setCreateTime(createTime);
             voucherOrder.setUpdateTime(LocalDateTime.now());
             try {
                 boolean saved = save(voucherOrder);
@@ -140,23 +147,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
                     throw new IllegalStateException("save voucher order failed");
                 }
+                benchmarkMetricsService.incrementConsumerCreated();
             } catch (DuplicateKeyException duplicateKeyException) {
+                seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
+                benchmarkMetricsService.incrementConsumerDuplicate();
                 log.info("ignore duplicate key while creating order, orderId={}, userId={}, voucherId={}, failureStage=saveOrder",
                         message.getOrderId(), userId, voucherId);
-                TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
                 return;
             }
 
-            OrderTimeoutMessage timeoutMessage = new OrderTimeoutMessage();
-            timeoutMessage.setOrderId(voucherOrder.getId());
-            timeoutMessage.setUserId(voucherOrder.getUserId());
-            timeoutMessage.setVoucherId(voucherOrder.getVoucherId());
-            timeoutMessage.setExpireAt(voucherOrder.getCreateTime().plusMinutes(livPickProperties.getOrder().getTimeoutMinutes()));
-            try {
-                orderTimeoutDelayQueueManager.offer(timeoutMessage);
-            } catch (Exception e) {
-                log.error("offer timeout order message failed, fallback scan will handle it, orderId={}", voucherOrder.getId(), e);
-            }
+            seckillReservationService.clearReusableOrderId(voucherId, userId, message.getOrderId());
+            offerTimeoutMessage(message.getOrderId(), userId, voucherId, createTime);
         } finally {
             redisLock.unlock();
         }
@@ -165,12 +166,84 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Override
     @Transactional(rollbackFor = Exception.class)
     public boolean payOrder(Long orderId) {
-        return update()
+        boolean updated = update()
                 .eq("id", orderId)
                 .eq("status", OrderStatusConstants.UNPAID)
                 .set("status", OrderStatusConstants.PAID)
                 .set("pay_time", LocalDateTime.now())
                 .set("update_time", LocalDateTime.now())
                 .update();
+        if (updated) {
+            benchmarkMetricsService.incrementPaySuccess();
+        }
+        return updated;
+    }
+
+    private void handleExistingOrder(SeckillOrderMessage message, VoucherOrder existingOrder) {
+        Long voucherId = message.getVoucherId();
+        Long userId = message.getUserId();
+
+        if (OrderStatusConstants.CANCELLED == existingOrder.getStatus()
+                && existingOrder.getId().equals(message.getOrderId())) {
+            if (!deductDbStock(voucherId)) {
+                seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
+                log.warn("db stock insufficient while reactivating cancelled order, orderId={}, userId={}, voucherId={}",
+                        message.getOrderId(), userId, voucherId);
+                return;
+            }
+
+            LocalDateTime createTime = resolveCreateTime(message);
+            boolean reactivated = update()
+                    .eq("id", existingOrder.getId())
+                    .eq("status", OrderStatusConstants.CANCELLED)
+                    .set("status", OrderStatusConstants.UNPAID)
+                    .set("pay_type", 1)
+                    .set("create_time", createTime)
+                    .set("pay_time", null)
+                    .set("use_time", null)
+                    .set("refund_time", null)
+                    .set("update_time", LocalDateTime.now())
+                    .update();
+            if (!reactivated) {
+                seckillReservationService.rollbackReservationBeforeOrderCreated(voucherId, userId);
+                log.warn("reactivate cancelled order lost optimistic race, orderId={}, userId={}, voucherId={}",
+                        message.getOrderId(), userId, voucherId);
+                return;
+            }
+
+            seckillReservationService.clearReusableOrderId(voucherId, userId, message.getOrderId());
+            benchmarkMetricsService.incrementConsumerReactivated();
+            offerTimeoutMessage(existingOrder.getId(), userId, voucherId, createTime);
+            return;
+        }
+
+        benchmarkMetricsService.incrementConsumerDuplicate();
+        log.info("skip duplicated or stale consume, orderId={}, existingOrderId={}, existingStatus={}, userId={}, voucherId={}",
+                message.getOrderId(), existingOrder.getId(), existingOrder.getStatus(), userId, voucherId);
+    }
+
+    private boolean deductDbStock(Long voucherId) {
+        return seckillVoucherService.update()
+                .setSql("stock = stock - 1")
+                .eq("voucher_id", voucherId)
+                .gt("stock", 0)
+                .update();
+    }
+
+    private LocalDateTime resolveCreateTime(SeckillOrderMessage message) {
+        return message.getCreateTime() == null ? LocalDateTime.now() : message.getCreateTime();
+    }
+
+    private void offerTimeoutMessage(Long orderId, Long userId, Long voucherId, LocalDateTime createTime) {
+        OrderTimeoutMessage timeoutMessage = new OrderTimeoutMessage();
+        timeoutMessage.setOrderId(orderId);
+        timeoutMessage.setUserId(userId);
+        timeoutMessage.setVoucherId(voucherId);
+        timeoutMessage.setExpireAt(createTime.plusMinutes(livPickProperties.getOrder().getTimeoutMinutes()));
+        try {
+            orderTimeoutDelayQueueManager.offer(timeoutMessage);
+        } catch (Exception e) {
+            log.error("offer timeout order message failed, fallback scan will handle it, orderId={}", orderId, e);
+        }
     }
 }

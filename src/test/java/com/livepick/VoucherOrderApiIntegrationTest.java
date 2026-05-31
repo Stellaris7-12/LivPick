@@ -5,6 +5,7 @@ import com.livepick.entity.Voucher;
 import com.livepick.entity.VoucherOrder;
 import com.livepick.mq.message.SeckillOrderMessage;
 import com.livepick.mq.producer.LivPickKafkaProducer;
+import com.livepick.service.SeckillReservationService;
 import com.livepick.support.ApiTestSupport;
 import com.livepick.utils.OrderStatusConstants;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.test.web.servlet.MvcResult;
 
+import javax.annotation.Resource;
 import java.util.Set;
 import java.util.concurrent.TimeoutException;
 
@@ -25,6 +27,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static com.livepick.utils.RedisConstants.SECKILL_PENDING_SEND_INDEX_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_PENDING_SEND_KEY;
+import static com.livepick.utils.RedisConstants.SECKILL_REORDER_KEY;
 
 @Transactional
 @SpringBootTest
@@ -33,6 +36,9 @@ class VoucherOrderApiIntegrationTest extends ApiTestSupport {
 
     @MockBean
     private LivPickKafkaProducer livPickKafkaProducer;
+
+    @Resource
+    private SeckillReservationService seckillReservationService;
 
     @Test
     void shouldSeckillVoucherAndSendKafkaMessage() throws Exception {
@@ -100,5 +106,52 @@ class VoucherOrderApiIntegrationTest extends ApiTestSupport {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(false))
                 .andExpect(jsonPath("$.errorMsg").isNotEmpty());
+    }
+
+    @Test
+    void shouldReuseCancelledOrderIdWhenUserSeckillsAgain() throws Exception {
+        Long userId = 9531L;
+        String token = prepareLoginToken(userId);
+        Voucher voucher = createSeckillVoucherFixture("api-reorder");
+        VoucherOrder cancelledOrder = createCancelledOrderFixture(voucher.getId(), userId);
+        clearSeckillReservation(voucher.getId(), userId);
+        registerCleanupKey(SECKILL_REORDER_KEY + voucher.getId() + ":" + userId);
+        stringRedisTemplate.opsForValue().set(
+                SECKILL_REORDER_KEY + voucher.getId() + ":" + userId,
+                String.valueOf(cancelledOrder.getId())
+        );
+
+        MvcResult mvcResult = mockMvc.perform(post("/voucher-order/seckill/{id}", voucher.getId())
+                        .header("authorization", token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andReturn();
+
+        Long orderId = JSONUtil.parseObj(mvcResult.getResponse().getContentAsString()).getLong("data");
+        org.junit.jupiter.api.Assertions.assertEquals(cancelledOrder.getId(), orderId);
+    }
+
+    @Test
+    void shouldWriteReusableOrderMarkerAfterTimeoutRollbackScript() {
+        Long voucherId = 701L;
+        Long userId = 702L;
+        Long orderId = 703L;
+        String stockKey = com.livepick.utils.RedisConstants.SECKILL_STOCK_KEY + voucherId;
+        String orderKey = com.livepick.utils.RedisConstants.SECKILL_ORDER_KEY + voucherId;
+        String reorderKey = SECKILL_REORDER_KEY + voucherId + ":" + userId;
+        registerCleanupKey(stockKey);
+        registerCleanupKey(orderKey);
+        registerCleanupKey(reorderKey);
+
+        stringRedisTemplate.opsForValue().set(stockKey, "9");
+        stringRedisTemplate.opsForSet().add(orderKey, String.valueOf(userId));
+
+        seckillReservationService.rollbackReservationAfterTimeoutCancel(voucherId, userId, orderId);
+
+        org.junit.jupiter.api.Assertions.assertEquals("10", stringRedisTemplate.opsForValue().get(stockKey));
+        org.junit.jupiter.api.Assertions.assertFalse(Boolean.TRUE.equals(
+                stringRedisTemplate.opsForSet().isMember(orderKey, String.valueOf(userId))
+        ));
+        org.junit.jupiter.api.Assertions.assertEquals(String.valueOf(orderId), stringRedisTemplate.opsForValue().get(reorderKey));
     }
 }

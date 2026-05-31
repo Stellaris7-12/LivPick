@@ -62,6 +62,9 @@ livpick:
     shop-filter-name: bf:shop:id
     expected-insertions: 100000
     false-probability: 0.03
+  benchmark:
+    enabled: ${LIVPICK_BENCHMARK_ENABLED:false}
+    skip-login-check: ${LIVPICK_BENCHMARK_SKIP_LOGIN_CHECK:false}
 logging:
   level:
     com.livepick: debug

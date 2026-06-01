@@ -66,7 +66,7 @@
 
 完整横向结论见：
 
-- [architecture-comparison.md](/C:/Users/heyunhui/IdeaProjects/LivPick-db-cache-mq/benchmark-final/reports/interview/architecture-comparison.md)
+- [architecture-comparison.md](/C:/Users/heyunhui/IdeaProjects/LivPick-db-cache-mq/interview/architecture-comparison.md)
 
 这里保留本架构最重要的结论：
 

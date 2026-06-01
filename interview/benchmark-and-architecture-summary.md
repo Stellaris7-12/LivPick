@@ -1,4 +1,4 @@
-# 三种架构横向对比总结
+# 压测与架构总结报告
 
 ## 1. 结论先行
 
@@ -47,6 +47,141 @@
 - `db-cache-mq` 是本轮在独立 schema `livpick_db_cache_mq` 上补跑。
 - 本轮 `db-cache-mq` 使用的是单机、单 Redis、单 Kafka broker、单 partition。
 - 这个部署方式会压低 Kafka 架构的并行收益，因此更适合验证“异步削峰闭环是否正确”，不适合把它当作 Kafka 横向扩展能力的上限。
+
+## 2.1 本轮压测使用的技术栈
+
+本轮 benchmark 不是只靠 JMeter 单点压接口，而是由以下几部分组合完成：
+
+- 压测流量生成：`JMeter 5.6.3`
+- 场景编排与结果汇总：`PowerShell` runner 脚本
+- 应用侧观测：业务内 `BenchmarkMetricsService` 探针 + `/benchmark/metrics` 系列接口
+- 中间件状态采样：
+  - `docker exec redis-cli`
+  - `docker exec kafka-consumer-groups.sh`
+  - `mysql` 命令行查询
+- 运行环境：
+  - `Java 11`
+  - `MySQL`
+  - `Redis`
+  - `Kafka`
+  - `Redisson`
+
+对应实现位置包括：
+
+- [`benchmark-final/suites/db-cache-mq/standard/run-jmeter-benchmark.ps1`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\benchmark-final\suites\db-cache-mq\standard\run-jmeter-benchmark.ps1)
+- [`benchmark-final/suites/db-cache-mq/flash-sale/run-jmeter-benchmark.ps1`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\benchmark-final\suites\db-cache-mq\flash-sale\run-jmeter-benchmark.ps1)
+- [`src/main/java/com/livepick/service/benchmark/BenchmarkMetricsService.java`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\src\main\java\com\livepick\service\benchmark\BenchmarkMetricsService.java)
+
+因此当前压测方案可以概括为：
+
+`JMeter + PowerShell 编排 + 业务内埋点 + MySQL/Redis/Kafka 命令行采样`
+
+## 2.2 当前系统指标监控是怎么实现的
+
+是的，当前这套 benchmark 指标采集，本质上是通过**直接在业务代码中插入轻量探针**来实现的。
+
+具体方式是：
+
+- 在秒杀、缓存、关单、稳定性相关链路中埋入计数器与延迟采样逻辑
+- 由 `BenchmarkMetricsService` 统一维护内存中的指标快照
+- 再通过 `/benchmark/metrics` 和 `/benchmark/admin/**` 接口对外暴露
+
+这意味着当前方案更偏向：
+
+- `benchmark-only` 观测方案
+- 面向实验和压测结论服务
+- 不是一套完整的通用监控平台
+
+## 2.3 相较 Prometheus 的优缺点
+
+### 当前业务内探针方案的优点
+
+#### 1. 实现成本低，接入快
+
+不需要额外部署 Prometheus、Exporter、Grafana，只要在业务关键路径加计数器和采样逻辑，就可以很快形成一套可用于压测的数据面。
+
+#### 2. 业务语义更强
+
+Prometheus 更适合采集通用系统指标，比如：
+
+- CPU
+- 内存
+- JVM
+- HTTP QPS
+
+但像下面这些强业务语义指标：
+
+- `luaStockRejected`
+- `pendingRegistered`
+- `consumerCreated`
+- `timeoutDelayQueueTriggered`
+- `consumerPauseAccepted`
+
+直接在业务里埋点更容易表达，也更适合支撑秒杀专题压测结论。
+
+#### 3. 更适合做实验型对照
+
+这套方案支持 benchmark-only 开关、模式切换和实验控制，比如：
+
+- `cache-penetration` 开 / 关
+- `timeout-mode` 切换
+- `consumer-pause` 演练
+
+对你当前这种“以项目压测和架构分析为目标”的场景，其实很合适。
+
+### 当前业务内探针方案的缺点
+
+#### 1. 不够标准化
+
+这套指标体系是项目内自定义的，不具备 Prometheus 那种标准化采集、拉取、存储和查询生态。
+
+#### 2. 缺少系统级全局视角
+
+当前方案虽然能看到业务关键指标，但对下面这些系统层信息不如 Prometheus 完整：
+
+- JVM GC
+- 线程池状态
+- 主机 CPU / 内存 / 磁盘
+- Redis/Kafka/MySQL 的完整运行指标
+
+所以它更像“业务专题观测”，而不是“系统级统一监控”。
+
+#### 3. 数据持久化和可视化能力弱
+
+当前指标是内存态快照，通过接口临时读取，更适合单轮压测采样和结果汇总。  
+而 Prometheus 天然更适合：
+
+- 长时间序列存储
+- 多次实验横向对比
+- 告警
+- Grafana 可视化
+
+#### 4. 对代码侵入更强
+
+Prometheus 通常通过标准埋点或成熟 exporter 接入，而当前方案是你直接在业务代码里插入自定义探针。  
+这会带来：
+
+- 代码耦合更高
+- 维护口径要靠人工约束
+- benchmark 逻辑和业务逻辑更容易缠在一起
+
+## 2.4 为什么本项目当前没有优先上 Prometheus
+
+这不是因为 Prometheus 不好，而是因为当前目标更偏向：
+
+- 产出可用于简历和面试的专题压测数据
+- 聚焦秒杀业务链路的关键指标
+- 在本机单机环境下快速完成架构对比实验
+
+在这个目标下，业务内探针方案更轻、更直接，也更容易快速得到“Lua 拦截了多少请求、Kafka 最终创建了多少订单、关单是延迟队列触发还是 fallback 触发”这类业务结论。
+
+如果后续要把这个项目继续往“更像生产监控体系”方向打磨，那么最合理的升级路线是：
+
+1. 保留当前业务语义探针
+2. 补充 Micrometer + Prometheus
+3. 再接 Grafana 做统一可视化
+
+这样既不丢秒杀专题指标，也能补上系统层监控能力。
 
 ## 3. standard 场景对比
 

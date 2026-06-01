@@ -175,6 +175,33 @@ src/main/java/com/livepick
 - `db-cache-mq` 为本轮补跑
 - 主结论优先看高反差秒杀 `flash-sale` 场景，不拿大库存 `baseline` 做核心卖点
 
+### 压测技术栈与指标采集方式
+
+当前这套 benchmark 使用的技术栈包括：
+
+- `JMeter 5.6.3`：生成压测流量
+- `PowerShell` runner：负责编排场景、重置环境、汇总结果
+- `MySQL / Redis / Kafka` 命令行工具：采集库存、订单数、consumer lag 等中间件状态
+- 业务内 `BenchmarkMetricsService`：采集秒杀、缓存、关单、稳定性相关指标
+- `/benchmark/metrics` 与 `/benchmark/admin/**`：对外暴露 benchmark-only 指标和控制接口
+
+因此当前指标监控并不是 Prometheus 方案，而是**直接在业务链路中插入轻量探针**实现的专题压测观测方案。
+
+这种方式的优点是：
+
+- 实现成本低，适合本机单机环境快速做专题压测
+- 业务语义强，便于直接统计 `luaStockRejected`、`consumerCreated`、`pendingRetried`、`timeoutDelayQueueTriggered` 等秒杀专属指标
+- 更适合做架构对照实验和项目结论沉淀
+
+缺点是：
+
+- 不如 Prometheus 标准化
+- 缺少系统级全局监控能力
+- 时间序列存储和可视化能力较弱
+- 对业务代码有一定侵入
+
+如果继续往生产级监控体系演进，更合理的路线是保留当前业务探针，同时补充 `Micrometer + Prometheus + Grafana`。
+
 ### flash-sale 正式结果
 
 #### sustain 场景
@@ -215,7 +242,7 @@ src/main/java/com/livepick
 详细对比见：
 
 - [`benchmark-final/reports/db-cache-mq.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\benchmark-final\reports\db-cache-mq.md)
-- [`interview/architecture-comparison.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\interview\architecture-comparison.md)
+- [`interview/benchmark-and-architecture-summary.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\interview\benchmark-and-architecture-summary.md)
 
 ---
 
@@ -388,5 +415,5 @@ LIVPICK_BENCHMARK_SKIP_LOGIN_CHECK=true
 ## 相关文档
 
 - [`benchmark-final/reports/db-cache-mq.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\benchmark-final\reports\db-cache-mq.md)
-- [`interview/architecture-comparison.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\interview\architecture-comparison.md)
+- [`interview/benchmark-and-architecture-summary.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\interview\benchmark-and-architecture-summary.md)
 - [`interview/resume-and-interview-playbook.md`](C:\Users\heyunhui\IdeaProjects\LivPick-db-cache-mq\interview\resume-and-interview-playbook.md)

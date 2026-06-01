@@ -14,6 +14,7 @@ import com.livepick.service.IVoucherOrderService;
 import com.livepick.service.SeckillPendingSendService;
 import com.livepick.service.SeckillReservationService;
 import com.livepick.service.benchmark.BenchmarkMetricsService;
+import com.livepick.service.benchmark.BenchmarkRuntimeConfigService;
 import com.livepick.utils.OrderStatusConstants;
 import com.livepick.utils.RedisIdWorker;
 import com.livepick.utils.UserHolder;
@@ -56,6 +57,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private final SeckillReservationService seckillReservationService;
     private final SeckillPendingSendService seckillPendingSendService;
     private final BenchmarkMetricsService benchmarkMetricsService;
+    private final BenchmarkRuntimeConfigService runtimeConfigService;
 
     @Override
     public Result seckillVoucher(Long voucherId) {
@@ -77,6 +79,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail(executeResult == 1 ? "库存不足" : "不能重复下单");
         }
         benchmarkMetricsService.incrementApiAccepted();
+        if (runtimeConfigService.isConsumerPaused()) {
+            benchmarkMetricsService.incrementConsumerPauseAccepted();
+        }
 
         SeckillOrderMessage message = new SeckillOrderMessage();
         message.setOrderId(orderId);
@@ -239,7 +244,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         timeoutMessage.setOrderId(orderId);
         timeoutMessage.setUserId(userId);
         timeoutMessage.setVoucherId(voucherId);
-        timeoutMessage.setExpireAt(createTime.plusMinutes(livPickProperties.getOrder().getTimeoutMinutes()));
+        timeoutMessage.setExpireAt(createTime.plus(runtimeConfigService.getOrderTimeoutDuration()));
         try {
             orderTimeoutDelayQueueManager.offer(timeoutMessage);
         } catch (Exception e) {

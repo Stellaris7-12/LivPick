@@ -34,8 +34,10 @@ public class SeckillPendingRetryTask {
         while (true) {
             List<PendingSeckillOrderMessage> dueMessages = pendingSendService.pollDueMessages();
             if (dueMessages.isEmpty()) {
+                benchmarkMetricsService.markMqDrained();
                 return;
             }
+            benchmarkMetricsService.updateMqBacklog(dueMessages.size());
             dueMessages.forEach(this::retrySingleMessage);
         }
     }

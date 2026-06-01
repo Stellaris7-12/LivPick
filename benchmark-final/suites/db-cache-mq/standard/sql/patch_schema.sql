@@ -1,8 +1,17 @@
-ALTER TABLE tb_voucher_order
-    MODIFY COLUMN id bigint(20) NOT NULL AUTO_INCREMENT COMMENT 'primary key';
+SET @idx_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE()
+      AND table_name = 'tb_voucher_order'
+      AND index_name = 'idx_status_create_time'
+);
 
-ALTER TABLE tb_voucher_order
-    ADD UNIQUE KEY uk_voucher_user (voucher_id, user_id);
+SET @ddl := IF(
+    @idx_exists = 0,
+    'ALTER TABLE tb_voucher_order ADD INDEX idx_status_create_time (status, create_time)',
+    'SELECT 1'
+);
 
-ALTER TABLE tb_voucher_order
-    ADD INDEX idx_status_create_time (status, create_time);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

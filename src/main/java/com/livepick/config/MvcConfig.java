@@ -1,5 +1,6 @@
 package com.livepick.config;
 
+import com.livepick.utils.BenchmarkUserInjector;
 import com.livepick.utils.LoginInterceptor;
 import com.livepick.utils.RefreshTokenInterceptor;
 import org.springframework.context.annotation.Configuration;
@@ -14,6 +15,8 @@ public class MvcConfig implements WebMvcConfigurer {
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private BenchmarkUserInjector benchmarkUserInjector;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -29,7 +32,7 @@ public class MvcConfig implements WebMvcConfigurer {
                         "/benchmark/**"
                 )
                 .order(1);
-        registry.addInterceptor(new RefreshTokenInterceptor(stringRedisTemplate))
+        registry.addInterceptor(new RefreshTokenInterceptor(stringRedisTemplate, benchmarkUserInjector))
                 .addPathPatterns("/**")
                 .order(0);
     }

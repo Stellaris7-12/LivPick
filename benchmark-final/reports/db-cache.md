@@ -9,8 +9,8 @@
 
 对应套件入口：
 
-- `benchmark/suites/db-cache/standard/`
-- `benchmark/suites/db-cache/flash-sale/`
+- `benchmark-final/suites/db-cache/standard/`
+- `benchmark-final/suites/db-cache/flash-sale/`
 
 对应权威结果目录：
 
@@ -58,9 +58,9 @@
 初始化独立数据库：
 
 ```powershell
-mysql -h 127.0.0.1 -P 3306 -u root -pheyunhui2856 < benchmark\suites\db-cache\standard\sql\create_database.sql
+mysql -h 127.0.0.1 -P 3306 -u root -pheyunhui2856 < benchmark-final\suites\db-cache\standard\sql\create_database.sql
 mysql -h 127.0.0.1 -P 3306 -u root -pheyunhui2856 livpick_db_cache < src\main\resources\db\hmdp2.sql
-mysql -h 127.0.0.1 -P 3306 -u root -pheyunhui2856 livpick_db_cache < benchmark\suites\db-cache\standard\sql\patch_schema.sql
+mysql -h 127.0.0.1 -P 3306 -u root -pheyunhui2856 livpick_db_cache < benchmark-final\suites\db-cache\standard\sql\patch_schema.sql
 ```
 
 ### 3.2 Redis 准备
@@ -77,7 +77,7 @@ docker exec livpick-redis-db-cache redis-cli PING
 单场景验证：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\standard\run-jmeter-benchmark.ps1 `
+powershell -ExecutionPolicy Bypass -File benchmark-final\suites\db-cache\standard\run-jmeter-benchmark.ps1 `
   -Scenario baseline-50 `
   -AppBaseUrl http://127.0.0.1:8081
 ```
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\standard\run-
 全量执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\standard\run-jmeter-benchmark.ps1 `
+powershell -ExecutionPolicy Bypass -File benchmark-final\suites\db-cache\standard\run-jmeter-benchmark.ps1 `
   -Scenario all `
   -EnableMonitoring `
   -AppBaseUrl http://127.0.0.1:8081
@@ -96,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\standard\run-
 单场景验证：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\flash-sale\run-jmeter-benchmark.ps1 `
+powershell -ExecutionPolicy Bypass -File benchmark-final\suites\db-cache\flash-sale\run-jmeter-benchmark.ps1 `
   -Scenario flash-sustain-5k-100 `
   -EnableMonitoring `
   -AppBaseUrl http://127.0.0.1:8081
@@ -105,7 +105,7 @@ powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\flash-sale\ru
 全量执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File benchmark\suites\db-cache\flash-sale\run-jmeter-benchmark.ps1 `
+powershell -ExecutionPolicy Bypass -File benchmark-final\suites\db-cache\flash-sale\run-jmeter-benchmark.ps1 `
   -Scenario all `
   -EnableMonitoring `
   -AppBaseUrl http://127.0.0.1:8081
@@ -305,3 +305,53 @@ UPDATE tb_seckill_voucher SET stock = stock - ? WHERE (voucher_id = ? AND stock 
 - 如果只看普通成功写场景，`db-cache` 和 `mysql-only` 结果接近是正常的
 - 如果看更符合真实秒杀特征的“库存极少、需求极大”场景，Redis 的价值会明显体现在整体入口吞吐和数据库减压上
 - 如果后续还要显著提升“成功订单”的吞吐能力，下一阶段仍然需要引入 MQ 或其他异步落库方案
+
+## 8. 与 MySQL-only 横向比较
+
+### 8.1 standard 成功写路径
+
+| 指标 | mysql-only | db-cache | 结论 |
+| --- | ---: | ---: | --- |
+| `baseline-100 QPS` | 219.02 | 199.33 | 都在 `~200 req/s` 量级 |
+| `baseline-500 QPS` | 214.58 | 207.56 | Redis 没有改变成功写吞吐上限 |
+| `baseline-500 Avg RT(ms)` | 2265.56 | 2344.12 | 都出现明显排队与等待 |
+| `baseline-500 RowLockWaitsDelta` | 13614 | 12265 | 热点库存行竞争依然存在 |
+| `baseline-500 RowLockTimeDeltaMs` | 475740 | 507923 | 锁等待时间量级接近 |
+
+结论：
+
+- 在常规成功写路径上，两种架构的瓶颈完全一致
+- Redis 没有改变“成功订单最终仍要落到单行库存更新”这一事实
+- 因此 `db-cache` 不应被理解为 standard 写路径吞吐优化，而是入口减压优化
+
+### 8.2 flash-sale 高反差场景
+
+| 指标 | mysql-only | db-cache | 提升 |
+| --- | ---: | ---: | ---: |
+| `flash-sustain-5k-100 QPS` | 577.44 | 1190.36 | `2.06x` |
+| `flash-sustain-5k-500 QPS` | 574.55 | 1184.95 | `2.06x` |
+| `flash-sustain-5k-100 Avg RT(ms)` | 804.97 | 374.20 | `-53.5%` |
+| `flash-sustain-5k-500 Avg RT(ms)` | 813.23 | 363.64 | `-55.3%` |
+| `flash-sustain-5k-100 RowLockWaitsDelta` | 30894 | 99 | `-99.68%` |
+| `flash-sustain-5k-500 RowLockWaitsDelta` | 30748 | 321 | `-98.96%` |
+| `flash-sustain-5k-100 RowLockTimeDeltaMs` | 69858 | 4507 | `-93.55%` |
+| `flash-sustain-5k-500 RowLockTimeDeltaMs` | 75369 | 8606 | `-88.58%` |
+
+结论：
+
+- `db-cache` 的主要收益集中在 flash-sale，而不是 standard
+- Redis 让大量失败请求在数据库之前被过滤，直接把入口吞吐提升到 `mysql-only` 的约两倍
+- 更重要的是，它把 MySQL 锁等待从 `3 万级` 压到 `百级`
+
+### 8.3 失败请求去向差异
+
+- `mysql-only flash-sustain-5k-100`：`Out of stock=34225`，`HttpHostConnectException=22`
+- `db-cache flash-sustain-5k-100`：`49900` 次失败全部为 `库存不足`
+- `mysql-only flash-sustain-5k-500`：`Out of stock=33578`，`HttpHostConnectException=27`
+- `db-cache flash-sustain-5k-500`：`49500` 次失败全部为 `库存不足`
+
+解释：
+
+- `db-cache` 下失败请求更快、更稳定地在业务入口被拒绝
+- `mysql-only` 下失败请求仍然需要进数据库竞争库存行，因此带来更多 RT 和锁等待成本
+- 两者成功订单数相同，但 `db-cache` 用更少的数据库代价完成了相同业务结果

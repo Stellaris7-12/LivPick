@@ -2,13 +2,18 @@
 
 This suite is prepared for the `MySQL + Redis + Kafka` architecture.
 
-Included in this implementation round:
-- benchmark-only management endpoints in the application
-- seckill correctness metrics exposed by `/benchmark/metrics`
-- schema patch requirement for timeout fallback scanning
-- directory structure for `standard` and `flash-sale`
+This round treats `flash-sale-5k-100/500` as the primary evidence for MQ peak shaving.
 
-Planned next:
-- finalize JMeter `.jmx` scenarios for standard and flash-sale
-- add runtime monitor scripts and aggregate summary output
-- produce the formal `db-cache-mq` benchmark report
+Current suite coverage:
+- `standard`
+  - correctness and auxiliary baseline
+  - cache-penetration OFF vs BLOOM_NULL
+- `flash-sale`
+  - main seckill comparison scenarios
+  - consumer pause and backlog recovery
+- `timeout-latency`
+  - `FALLBACK_ONLY` vs `DELAY_QUEUE_FALLBACK`
+
+Interpretation rule:
+- use `flash-sale` as the primary conclusion
+- use large-stock `baseline` only as supporting context

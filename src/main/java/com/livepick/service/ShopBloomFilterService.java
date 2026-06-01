@@ -3,6 +3,8 @@ package com.livepick.service;
 import com.livepick.config.LivPickProperties;
 import com.livepick.entity.Shop;
 import com.livepick.mapper.ShopMapper;
+import com.livepick.service.benchmark.BenchmarkMetricsService;
+import com.livepick.service.benchmark.BenchmarkRuntimeConfigService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RBloomFilter;
@@ -20,6 +22,8 @@ public class ShopBloomFilterService {
     private final RedissonClient redissonClient;
     private final ShopMapper shopMapper;
     private final LivPickProperties livPickProperties;
+    private final BenchmarkMetricsService benchmarkMetricsService;
+    private final BenchmarkRuntimeConfigService runtimeConfigService;
 
     private RBloomFilter<String> shopBloomFilter;
 
@@ -36,7 +40,17 @@ public class ShopBloomFilterService {
     }
 
     public boolean mightContain(Long shopId) {
-        return shopBloomFilter.contains(String.valueOf(shopId));
+        if (!runtimeConfigService.isCachePenetrationProtectionEnabled()) {
+            benchmarkMetricsService.incrementBloomPassed();
+            return true;
+        }
+        boolean contains = shopBloomFilter.contains(String.valueOf(shopId));
+        if (contains) {
+            benchmarkMetricsService.incrementBloomPassed();
+        } else {
+            benchmarkMetricsService.incrementBloomRejected();
+        }
+        return contains;
     }
 
     public void addShop(Long shopId) {

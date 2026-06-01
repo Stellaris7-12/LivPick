@@ -16,10 +16,12 @@ import static com.livepick.utils.RedisConstants.LOGIN_USER_TTL;
 
 public class RefreshTokenInterceptor implements HandlerInterceptor {
 
-    private StringRedisTemplate stringRedisTemplate;
+    private final StringRedisTemplate stringRedisTemplate;
+    private final BenchmarkUserInjector benchmarkUserInjector;
 
-    public RefreshTokenInterceptor(StringRedisTemplate stringRedisTemplate) {
+    public RefreshTokenInterceptor(StringRedisTemplate stringRedisTemplate, BenchmarkUserInjector benchmarkUserInjector) {
         this.stringRedisTemplate = stringRedisTemplate;
+        this.benchmarkUserInjector = benchmarkUserInjector;
     }
 
     @Override
@@ -27,6 +29,7 @@ public class RefreshTokenInterceptor implements HandlerInterceptor {
         // 1.获取请求头中的token
         String token = request.getHeader("authorization");
         if (StrUtil.isBlank(token)) {
+            benchmarkUserInjector.injectIfPresent(request);
             return true;
         }
         // 2.基于TOKEN获取redis中的用户
@@ -34,6 +37,7 @@ public class RefreshTokenInterceptor implements HandlerInterceptor {
         Map<Object, Object> userMap = stringRedisTemplate.opsForHash().entries(key);
         // 3.判断用户是否存在
         if (userMap.isEmpty()) {
+            benchmarkUserInjector.injectIfPresent(request);
             return true;
         }
         // 5.将查询到的hash数据转为UserDTO

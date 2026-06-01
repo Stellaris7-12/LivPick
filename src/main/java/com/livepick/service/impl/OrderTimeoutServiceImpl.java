@@ -9,12 +9,14 @@ import com.livepick.service.IOrderTimeoutService;
 import com.livepick.service.ISeckillVoucherService;
 import com.livepick.service.SeckillReservationService;
 import com.livepick.service.benchmark.BenchmarkMetricsService;
+import com.livepick.service.benchmark.BenchmarkRuntimeConfigService;
 import com.livepick.utils.OrderStatusConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -28,10 +30,17 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
     private final LivPickProperties livPickProperties;
     private final SeckillReservationService seckillReservationService;
     private final BenchmarkMetricsService benchmarkMetricsService;
+    private final BenchmarkRuntimeConfigService runtimeConfigService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public boolean closeTimeoutOrder(Long orderId) {
+        return closeTimeoutOrder(orderId, "UNKNOWN");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public boolean closeTimeoutOrder(Long orderId, String triggerSource) {
         VoucherOrder order = voucherOrderMapper.selectById(orderId);
         if (order == null) {
             return false;
@@ -58,13 +67,24 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
                 order.getUserId(),
                 order.getId()
         );
+
         benchmarkMetricsService.incrementTimeoutClosed();
+        benchmarkMetricsService.incrementTimeoutExpired();
+        if ("DELAY_QUEUE".equalsIgnoreCase(triggerSource)) {
+            benchmarkMetricsService.incrementTimeoutDelayQueueTriggered();
+        } else if ("FALLBACK".equalsIgnoreCase(triggerSource)) {
+            benchmarkMetricsService.incrementTimeoutFallbackTriggered();
+        }
+        Duration timeoutDuration = runtimeConfigService.getOrderTimeoutDuration();
+        LocalDateTime expireAt = order.getCreateTime().plus(timeoutDuration);
+        benchmarkMetricsService.recordTimeoutLag(Duration.between(expireAt, LocalDateTime.now()).toMillis());
         return true;
     }
 
     @Override
     public void scanAndCloseTimeoutOrders() {
-        LocalDateTime expireBefore = LocalDateTime.now().minusMinutes(livPickProperties.getOrder().getTimeoutMinutes());
+        Duration timeoutDuration = runtimeConfigService.getOrderTimeoutDuration();
+        LocalDateTime expireBefore = LocalDateTime.now().minus(timeoutDuration);
         while (true) {
             List<VoucherOrder> timeoutOrders = voucherOrderMapper.selectList(
                     new QueryWrapper<VoucherOrder>()
@@ -77,7 +97,7 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
             }
             timeoutOrders.forEach(order -> {
                 try {
-                    closeTimeoutOrder(order.getId());
+                    closeTimeoutOrder(order.getId(), "FALLBACK");
                 } catch (Exception e) {
                     log.error("close timeout order failed, orderId={}", order.getId(), e);
                 }

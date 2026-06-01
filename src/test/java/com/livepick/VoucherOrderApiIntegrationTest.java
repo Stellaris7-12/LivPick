@@ -6,6 +6,7 @@ import com.livepick.entity.VoucherOrder;
 import com.livepick.mq.message.SeckillOrderMessage;
 import com.livepick.mq.producer.LivPickKafkaProducer;
 import com.livepick.service.SeckillReservationService;
+import com.livepick.service.benchmark.BenchmarkRuntimeConfigService;
 import com.livepick.support.ApiTestSupport;
 import com.livepick.utils.OrderStatusConstants;
 import org.junit.jupiter.api.Test;
@@ -30,7 +31,10 @@ import static com.livepick.utils.RedisConstants.SECKILL_PENDING_SEND_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_REORDER_KEY;
 
 @Transactional
-@SpringBootTest
+@SpringBootTest(properties = {
+        "livpick.benchmark.enabled=true",
+        "livpick.benchmark.skip-login-check=true"
+})
 @AutoConfigureMockMvc
 class VoucherOrderApiIntegrationTest extends ApiTestSupport {
 
@@ -39,6 +43,8 @@ class VoucherOrderApiIntegrationTest extends ApiTestSupport {
 
     @Resource
     private SeckillReservationService seckillReservationService;
+    @Resource
+    private BenchmarkRuntimeConfigService benchmarkRuntimeConfigService;
 
     @Test
     void shouldSeckillVoucherAndSendKafkaMessage() throws Exception {
@@ -153,5 +159,20 @@ class VoucherOrderApiIntegrationTest extends ApiTestSupport {
                 stringRedisTemplate.opsForSet().isMember(orderKey, String.valueOf(userId))
         ));
         org.junit.jupiter.api.Assertions.assertEquals(String.valueOf(orderId), stringRedisTemplate.opsForValue().get(reorderKey));
+    }
+
+    @Test
+    void shouldAllowBenchmarkHeaderBypassWhenEnabled() throws Exception {
+        Long userId = 9532L;
+        Voucher voucher = createSeckillVoucherFixture("api-benchmark-bypass");
+        clearSeckillReservation(voucher.getId(), userId);
+
+        org.junit.jupiter.api.Assertions.assertTrue(benchmarkRuntimeConfigService.isAuthBypassEnabled());
+
+        mockMvc.perform(post("/voucher-order/seckill/{id}", voucher.getId())
+                        .header("X-Benchmark-User-Id", benchmarkUserIdHeader(userId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data").isNumber());
     }
 }

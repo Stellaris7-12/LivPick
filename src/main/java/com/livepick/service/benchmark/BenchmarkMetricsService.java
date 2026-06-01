@@ -2,12 +2,17 @@ package com.livepick.service.benchmark;
 
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class BenchmarkMetricsService {
+
+    private static final int LATENCY_SAMPLE_LIMIT = 10_000;
 
     private final AtomicLong apiAccepted = new AtomicLong();
     private final AtomicLong luaStockRejected = new AtomicLong();
@@ -23,6 +28,83 @@ public class BenchmarkMetricsService {
     private final AtomicLong consumerFailure = new AtomicLong();
     private final AtomicLong timeoutClosed = new AtomicLong();
     private final AtomicLong paySuccess = new AtomicLong();
+    private final AtomicLong cacheRequests = new AtomicLong();
+    private final AtomicLong bloomRejected = new AtomicLong();
+    private final AtomicLong bloomPassed = new AtomicLong();
+    private final AtomicLong cacheNullHit = new AtomicLong();
+    private final AtomicLong redisQuery = new AtomicLong();
+    private final AtomicLong dbFallback = new AtomicLong();
+    private final AtomicLong timeoutExpired = new AtomicLong();
+    private final AtomicLong timeoutDelayQueueTriggered = new AtomicLong();
+    private final AtomicLong timeoutFallbackTriggered = new AtomicLong();
+    private final AtomicLong mqBacklogPeak = new AtomicLong();
+    private final AtomicLong mqDrainCompletedAt = new AtomicLong();
+    private final AtomicLong consumerPauseAccepted = new AtomicLong();
+    private final AtomicLong stabilityRecoveryCompleted = new AtomicLong();
+    private final AtomicLong metricsResetAt = new AtomicLong(System.currentTimeMillis());
+
+    private final ConcurrentLinkedQueue<Long> cacheLatencySamples = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<Long> timeoutLagSamples = new ConcurrentLinkedQueue<>();
+
+    public void incrementCacheRequests() {
+        cacheRequests.incrementAndGet();
+    }
+
+    public void incrementBloomRejected() {
+        bloomRejected.incrementAndGet();
+    }
+
+    public void incrementBloomPassed() {
+        bloomPassed.incrementAndGet();
+    }
+
+    public void incrementCacheNullHit() {
+        cacheNullHit.incrementAndGet();
+    }
+
+    public void incrementRedisQuery() {
+        redisQuery.incrementAndGet();
+    }
+
+    public void incrementDbFallback() {
+        dbFallback.incrementAndGet();
+    }
+
+    public void recordCacheLatency(long latencyMs) {
+        addSample(cacheLatencySamples, latencyMs);
+    }
+
+    public void incrementTimeoutExpired() {
+        timeoutExpired.incrementAndGet();
+    }
+
+    public void incrementTimeoutDelayQueueTriggered() {
+        timeoutDelayQueueTriggered.incrementAndGet();
+    }
+
+    public void incrementTimeoutFallbackTriggered() {
+        timeoutFallbackTriggered.incrementAndGet();
+    }
+
+    public void recordTimeoutLag(long lagMs) {
+        addSample(timeoutLagSamples, lagMs);
+    }
+
+    public void updateMqBacklog(long backlog) {
+        mqBacklogPeak.accumulateAndGet(backlog, Math::max);
+    }
+
+    public void markMqDrained() {
+        mqDrainCompletedAt.set(System.currentTimeMillis());
+    }
+
+    public void incrementConsumerPauseAccepted() {
+        consumerPauseAccepted.incrementAndGet();
+    }
+
+    public void incrementStabilityRecoveryCompleted() {
+        stabilityRecoveryCompleted.incrementAndGet();
+    }
 
     public void incrementApiAccepted() {
         apiAccepted.incrementAndGet();
@@ -98,6 +180,34 @@ public class BenchmarkMetricsService {
         seckill.put("timeoutClosed", timeoutClosed.get());
         seckill.put("paySuccess", paySuccess.get());
         root.put("seckill", seckill);
+
+        Map<String, Object> cache = new LinkedHashMap<>();
+        cache.put("requests", cacheRequests.get());
+        cache.put("bloomRejected", bloomRejected.get());
+        cache.put("bloomPassed", bloomPassed.get());
+        cache.put("cacheNullHit", cacheNullHit.get());
+        cache.put("redisQuery", redisQuery.get());
+        cache.put("dbFallback", dbFallback.get());
+        cache.put("latencyAvgMs", average(cacheLatencySamples));
+        cache.put("latencyP95Ms", percentile(cacheLatencySamples, 0.95));
+        root.put("cache", cache);
+
+        Map<String, Object> timeout = new LinkedHashMap<>();
+        timeout.put("expired", timeoutExpired.get());
+        timeout.put("delayQueueTriggered", timeoutDelayQueueTriggered.get());
+        timeout.put("fallbackTriggered", timeoutFallbackTriggered.get());
+        timeout.put("closeLagP50Ms", percentile(timeoutLagSamples, 0.50));
+        timeout.put("closeLagP95Ms", percentile(timeoutLagSamples, 0.95));
+        timeout.put("closeLagMaxMs", max(timeoutLagSamples));
+        root.put("timeout", timeout);
+
+        Map<String, Object> stability = new LinkedHashMap<>();
+        stability.put("mqBacklogPeak", mqBacklogPeak.get());
+        stability.put("mqDrainCompletedAt", mqDrainCompletedAt.get());
+        stability.put("consumerPauseAccepted", consumerPauseAccepted.get());
+        stability.put("stabilityRecoveryCompleted", stabilityRecoveryCompleted.get());
+        stability.put("metricsResetAt", metricsResetAt.get());
+        root.put("stability", stability);
         return root;
     }
 
@@ -116,5 +226,67 @@ public class BenchmarkMetricsService {
         consumerFailure.set(0);
         timeoutClosed.set(0);
         paySuccess.set(0);
+        cacheRequests.set(0);
+        bloomRejected.set(0);
+        bloomPassed.set(0);
+        cacheNullHit.set(0);
+        redisQuery.set(0);
+        dbFallback.set(0);
+        timeoutExpired.set(0);
+        timeoutDelayQueueTriggered.set(0);
+        timeoutFallbackTriggered.set(0);
+        mqBacklogPeak.set(0);
+        mqDrainCompletedAt.set(0);
+        consumerPauseAccepted.set(0);
+        stabilityRecoveryCompleted.set(0);
+        metricsResetAt.set(System.currentTimeMillis());
+        cacheLatencySamples.clear();
+        timeoutLagSamples.clear();
+    }
+
+    private void addSample(ConcurrentLinkedQueue<Long> samples, long value) {
+        if (samples.size() >= LATENCY_SAMPLE_LIMIT) {
+            samples.poll();
+        }
+        samples.offer(Math.max(0L, value));
+    }
+
+    private double average(ConcurrentLinkedQueue<Long> samples) {
+        if (samples.isEmpty()) {
+            return 0D;
+        }
+        long total = 0L;
+        int count = 0;
+        for (Long value : samples) {
+            total += value;
+            count++;
+        }
+        return count == 0 ? 0D : Math.round((total * 100.0D) / count) / 100.0D;
+    }
+
+    private long percentile(ConcurrentLinkedQueue<Long> samples, double percentile) {
+        if (samples.isEmpty()) {
+            return 0L;
+        }
+        List<Long> sorted = new ArrayList<>(samples);
+        sorted.sort(Long::compareTo);
+        int index = (int) Math.ceil(percentile * sorted.size()) - 1;
+        if (index < 0) {
+            index = 0;
+        }
+        if (index >= sorted.size()) {
+            index = sorted.size() - 1;
+        }
+        return sorted.get(index);
+    }
+
+    private long max(ConcurrentLinkedQueue<Long> samples) {
+        long max = 0L;
+        for (Long value : samples) {
+            if (value > max) {
+                max = value;
+            }
+        }
+        return max;
     }
 }

@@ -121,4 +121,8 @@ public abstract class ApiTestSupport {
     protected void registerCleanupKey(String key) {
         cleanupRedisKeys.add(key);
     }
+
+    protected String benchmarkUserIdHeader(Long userId) {
+        return String.valueOf(userId);
+    }
 }

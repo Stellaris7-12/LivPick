@@ -60,5 +60,9 @@ public class LivPickProperties {
     public static class Benchmark {
         private boolean enabled = false;
         private boolean skipLoginCheck = false;
+        private boolean authBypassEnabled = false;
+        private String cachePenetrationMode = "BLOOM_NULL";
+        private String timeoutMode = "DELAY_QUEUE_FALLBACK";
+        private long orderTimeoutSecondsOverride = -1L;
     }
 }

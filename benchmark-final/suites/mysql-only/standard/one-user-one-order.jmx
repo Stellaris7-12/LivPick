@@ -45,7 +45,7 @@
           </elementProp>
           <elementProp name="userCsv" elementType="Argument">
             <stringProp name="Argument.name">userCsv</stringProp>
-            <stringProp name="Argument.value">${__P(userCsv,benchmark/suites/mysql-only/standard/data/user_ids_repeat.csv)}</stringProp>
+            <stringProp name="Argument.value">${__P(userCsv,benchmark-final/suites/mysql-only/standard/data/user_ids_repeat.csv)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
         </collectionProp>

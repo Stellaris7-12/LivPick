@@ -223,6 +223,24 @@ src/main/java/com/livepick
 - 在 `5k` 级并发、库存仅 `100/500` 的高反差场景下，真正进入成功链路的请求被稳定压缩到库存量级
 - 最终 `FinalStock=0` 且 `FinalOrders=库存量`，说明异步落库没有破坏正确性
 
+### 缓存穿透专项结果
+
+在纯非法 `shopId=99999999` 的压测口径下：
+
+- `OFF` 模式下，`DB fallback=26`，`P95=114ms`
+- `BLOOM_NULL` 模式下，`DB fallback=0`，`P95=91ms`
+
+这说明 `RBloomFilter + 缓存空值` 方案将非法请求场景下的数据库回源从 `26` 次压低到 `0`，DB 回源下降 `100%`，同时将查询 `P95` 从 `114ms` 压低到 `91ms`。
+
+### 关单时效性专项结果
+
+在 `100 单 / 15 秒` 的统一口径下：
+
+- `FALLBACK_ONLY`：`CloseLagP95=4055ms`
+- `DELAY_QUEUE_FALLBACK`：`CloseLagP95=533ms`
+
+这说明 `Redisson` 延迟队列作为主路径、`Spring Task` 作为兜底的方案，将未支付订单自动关单 `P95` 延迟从 `4055ms` 缩短到 `533ms`，时效性提升约 `86.9%`。
+
 ### 三种架构的总体排序
 
 如果只看当前本机单节点入口吞吐：

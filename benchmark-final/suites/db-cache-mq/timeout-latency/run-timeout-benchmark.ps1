@@ -10,6 +10,9 @@ param(
     [string]$MySqlDb = "livpick_db_cache_mq",
 
     [Parameter(Mandatory = $false)]
+    [string]$RedisContainer = "livpick-redis",
+
+    [Parameter(Mandatory = $false)]
     [int]$VoucherId = 7,
 
     [Parameter(Mandatory = $false)]
@@ -50,6 +53,10 @@ function Reset-State {
     Invoke-AppJson -Method "Post" -Path "/benchmark/admin/metrics/reset" | Out-Null
     $sql = "UPDATE tb_seckill_voucher SET stock = 1000, begin_time = NOW() - INTERVAL 1 HOUR, end_time = NOW() + INTERVAL 2 HOUR WHERE voucher_id = $VoucherId; DELETE FROM tb_voucher_order WHERE voucher_id = $VoucherId;"
     mysql -h 127.0.0.1 -P 3306 -u root -D $MySqlDb -e $sql 2>$null | Out-Null
+    $stock = Get-DbScalar -Sql "SELECT stock FROM tb_seckill_voucher WHERE voucher_id = $VoucherId;"
+    if (-not [string]::IsNullOrWhiteSpace($stock)) {
+        docker exec $RedisContainer redis-cli SET "seckill:stock:$VoucherId" "$($stock.Trim())" | Out-Null
+    }
 }
 
 function Set-TimeoutMode {
@@ -73,7 +80,7 @@ function Create-UnpaidOrders {
         $userId = 900000 + $i
         $response = Invoke-AppJson -Method "Post" -Path "/voucher-order/seckill/$VoucherId" -Headers @{ "X-Benchmark-User-Id" = "$userId" }
         if (-not $response.success) {
-            throw "Failed to create unpaid order for benchmark user $userId: $($response.errorMsg)"
+            throw "Failed to create unpaid order for benchmark user ${userId}: $($response.errorMsg)"
         }
         $created.Add([pscustomobject]@{
             userId = $userId

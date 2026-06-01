@@ -259,6 +259,36 @@ Prometheus 通常通过标准埋点或成熟 exporter 接入，而当前方案�
 - `db-cache-mq` 在 `flash-burst-5k-500` 上已经跑赢了 `mysql-only` 和 `db-cache` 的入口 QPS，但整体还没有稳定压过 `db-cache`。
 - `db-cache-mq` 的价值更体现在“冲击后仍能保证最终排空和最终一致”，而不是当前本地单 partition 下的瞬时入口极限。
 
+## 4.3 缓存穿透专项
+
+这组实验只使用纯非法 `shopId=99999999` 流量，目的是单独量化 `RBloomFilter + 缓存空值` 对缓存穿透的治理效果。
+
+| 场景 | Samples | QPS | P95(ms) | DB Fallback | Null Hit | Bloom Rejected | Redis Query |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `cache-penetration-off-200` | 130781 | 2185.58 | 114 | 26 | 130755 | 0 | 130781 |
+| `cache-penetration-bloom-null-200` | 171597 | 2867.79 | 91 | 0 | 0 | 171597 | 0 |
+
+结论：
+
+- `BLOOM_NULL` 将非法请求场景下的 `DB fallback` 从 `26` 次压低到 `0`，数据库无效回源下降 `100%`。
+- 查询 `P95` 从 `114ms` 压低到 `91ms`，吞吐从 `2185.58 req/s` 提升到 `2867.79 req/s`。
+- 这说明布隆过滤器不仅拦住了无效回源，也减少了 Redis 空值写入与重复读取链路上的额外开销。
+
+## 4.4 关单时效性专项
+
+这组实验以 `100 单 / 15 秒` 为统一口径，对比纯 `Spring Task` 扫描与 `Redisson` 延迟队列主路径方案的差异。
+
+| 模式 | TimeoutClosed | Delay Queue Triggered | Fallback Triggered | P50(ms) | P95(ms) | Max(ms) | FinalCancelledOrders | FinalStock |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `FALLBACK_ONLY` | 100 | 0 | 100 | 3322 | 4055 | 4116 | 100 | 1000 |
+| `DELAY_QUEUE_FALLBACK` | 100 | 100 | 0 | 26 | 533 | 571 | 100 | 1000 |
+
+结论：
+
+- `DELAY_QUEUE_FALLBACK` 将未支付订单自动关单 `P95` 延迟从 `4055ms` 缩短到 `533ms`，时效提升约 `86.9%`。
+- `P50` 从 `3322ms` 降到 `26ms`，说明延迟队列主路径能够更贴近订单到期时刻触发关单。
+- 本轮结果中 `DelayQueueTriggered=100` 且 `FallbackTriggered=0`，说明延迟队列主路径已完整承接超时处理，`Spring Task` 主要承担兜底角色。
+
 ## 5. 为什么 db-cache-mq 仍然可以作为最终架构
 
 这是这轮最容易被误解的地方。

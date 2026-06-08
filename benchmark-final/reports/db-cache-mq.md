@@ -8,9 +8,108 @@
   - JDK 11
   - MySQL: `livpick_db_cache_mq`
   - Redis: 单节点 `livpick-redis`
-  - Kafka: 单 broker、`1 partition`、`livpick-kafka`
-  - benchmark 身份注入：`X-Benchmark-User-Id`
+- Kafka: 单 broker、`1 partition`、`livpick-kafka`
+- benchmark 身份注入：`X-Benchmark-User-Id`
 - 由于本轮使用的是单机、单 broker、单 partition，本报告更适合证明“异步削峰闭环正确且可观测”，不把它当作 Kafka 横向扩展上限。
+
+## 压测参数设置
+
+### 1. JMeter 通用设置
+
+除 `timeout-latency` 专项外，本轮 HTTP 压测均通过 `JMeter 5.6.3` 执行，通用设置如下：
+
+- `LoopController.continue_forever=true`
+- `LoopController.loops=-1`
+- `ThreadGroup.scheduler=true`
+- 通过 `durationSeconds` 控制压测总时长，而不是固定循环次数
+- `ThreadGroup.on_sample_error=continue`
+
+也就是说，本轮 JMeter 不是按“每个线程固定执行 N 次请求”来跑，而是按“在给定压测窗口内持续施压”来跑。  
+这样更适合秒杀场景，因为我们关注的是单位时间内的吞吐、响应延迟、MQ 积压和最终 drain 状态，而不是单线程跑满多少次循环。
+
+### 2. 正式场景参数表
+
+| 场景 | JMX | 线程数 | Ramp-Up(秒) | 持续时间(秒) | 循环次数 |
+| --- | --- | ---: | ---: | ---: | --- |
+| `baseline-50` | `baseline-throughput.jmx` | 50 | 5 | 60 | 无限循环，按 scheduler 截止 |
+| `baseline-100` | `baseline-throughput.jmx` | 100 | 5 | 60 | 同上 |
+| `baseline-200` | `baseline-throughput.jmx` | 200 | 5 | 60 | 同上 |
+| `baseline-500` | `baseline-throughput.jmx` | 500 | 5 | 60 | 同上 |
+| `oversell-100` | `oversell-check.jmx` | 100 | 5 | 60 | 同上 |
+| `one-user-one-order-100` | `one-user-one-order.jmx` | 100 | 5 | 60 | 同上 |
+| `cache-penetration-off-200` | `cache-penetration.jmx` | 200 | 5 | 60 | 同上 |
+| `cache-penetration-bloom-null-200` | `cache-penetration.jmx` | 200 | 5 | 60 | 同上 |
+| `flash-burst-5k-100` | `flash-burst-high-contrast.jmx` | 1000 | 3 | 10 | 同上 |
+| `flash-burst-5k-500` | `flash-burst-high-contrast.jmx` | 1000 | 3 | 10 | 同上 |
+| `flash-sustain-5k-100` | `flash-sustain-high-contrast.jmx` | 500 | 5 | 60 | 同上 |
+| `flash-sustain-5k-500` | `flash-sustain-high-contrast.jmx` | 500 | 5 | 60 | 同上 |
+| `stability-consumer-pause` | `flash-sustain-high-contrast.jmx` | 500 | 5 | 30 | 同上 |
+
+### 3. Timeout Latency 专项参数
+
+`timeout-latency` 不是 JMeter 场景，而是通过脚本直接创建未支付订单并等待系统自动关单，正式跑数口径为：
+
+| 场景 | 模式 | 订单数 | 订单超时时间 | 触发方式 |
+| --- | --- | ---: | ---: | --- |
+| `fallback-only` | `FALLBACK_ONLY` | 100 | 15 秒 | 创建未支付订单后轮询指标直到全部关单 |
+| `delay-queue-fallback` | `DELAY_QUEUE_FALLBACK` | 100 | 15 秒 | 同上 |
+
+之所以这里不用 JMeter，是因为该专项的重点不是 HTTP 吞吐，而是“订单到期时间”到“实际关单完成时间”的延迟分布，直接构造一批未支付订单更容易稳定观测 `P50 / P95 / Max close lag`。
+
+## 压测参数为什么这样设置
+
+### 1. `baseline / oversell / one-user-one-order` 统一使用 `60 秒 + 5 秒 Ramp-Up`
+
+这三类场景的目标是验证常规稳态下的吞吐和正确性，因此采用：
+
+- 适中的线程规模：`50 / 100 / 200 / 500`
+- 较平缓的升压：`5` 秒 Ramp-Up
+- 足够长的观察窗口：`60` 秒
+
+这样设置有两个作用：
+
+- 避免线程在 1~2 秒内同时砸入，导致结果更多反映 JMeter 瞬时建连抖动，而不是系统真实稳态表现。
+- 给 Kafka 异步链路、DB 热点竞争和 Redis 资格校验留下足够长的观测时间，便于比较 steady-state 吞吐与最终一致性。
+
+### 2. `flash-burst` 使用 `1000 线程 + 3 秒 Ramp-Up + 10 秒持续`
+
+`flash-burst` 的目标不是看长时间稳态，而是模拟“短时间流量洪峰”：
+
+- `1000` 线程保证短时间内有足够密集的并发请求打入入口
+- `3` 秒 Ramp-Up 保留明显的瞬时冲击感，同时避免完全 0 秒升压带来的压测机抖动
+- `10` 秒持续时间足以形成一次秒杀开场冲刺，但不会把场景拖成普通稳态压测
+
+它对应的真实业务含义是：活动刚开场、用户集中抢购、库存很少、请求在极短时间集中涌入。
+
+### 3. `flash-sustain` 使用 `500 线程 + 5 秒 Ramp-Up + 60 秒持续`
+
+`flash-sustain` 的目标是模拟“高热度活动在一段时间内持续承压”，所以参数比 `burst` 更偏稳态：
+
+- `500` 线程用于持续制造高并发压力
+- `5` 秒 Ramp-Up 避免瞬时冲击过强而掩盖持续承压能力
+- `60` 秒持续时间用于观察 Redis 前置过滤、Kafka backlog、消费者落库和最终 drain
+
+这类设置更接近真实业务中的“活动开始后仍有持续用户涌入”的情况，因此它被作为主结论场景，而不是仅用瞬时冲击结果下结论。
+
+### 4. `cache-penetration` 使用 `200 线程 + 60 秒持续`
+
+缓存穿透专项的目标不是把秒杀接口打满，而是隔离出“非法请求穿透缓存链路”的成本，因此采用：
+
+- 固定非法 `shopId=99999999`
+- `200` 线程持续施压
+- `60` 秒窗口统计 `DB fallback / bloomRejected / cacheNullHit / P95`
+
+这里线程数没有继续堆到 `500/1000`，是因为这个专项关注的是“同一类非法请求在两种防护模式下的链路差异”，`200` 线程已经足够稳定放大 DB 回源和缓存拦截差异，同时能降低压测机本身的噪声影响。
+
+### 5. `timeout-latency` 使用 `100 单 / 15 秒`
+
+关单时效性专项的目标是量化“订单到期后多久被真正关闭”，因此参数设计围绕时间分布而不是吞吐：
+
+- `100` 单：样本量足够计算 `P50 / P95 / Max`
+- `15` 秒超时：等待成本可控，同时足够观察 delay queue 与 fallback 的差异
+- 同一批订单统一不支付：避免支付行为干扰关单时间分布
+
+这组参数既能让结果稳定，又不会把实验拖得过长，适合在单机环境中做 A/B 对照。
 
 ## 主结论
 

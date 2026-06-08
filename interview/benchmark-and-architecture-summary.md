@@ -76,6 +76,35 @@
 
 `JMeter + PowerShell 编排 + 业务内埋点 + MySQL/Redis/Kafka 命令行采样`
 
+## 2.1.1 JMeter 参数与场景设计依据
+
+本轮 JMeter 统一采用“无限循环 + scheduler 按时长截止”的方式，而不是固定循环次数：
+
+- `LoopController.continue_forever=true`
+- `LoopController.loops=-1`
+- `ThreadGroup.scheduler=true`
+
+正式参数口径如下：
+
+| 场景 | 线程数 | Ramp-Up(秒) | 持续时间(秒) |
+| --- | ---: | ---: | ---: |
+| `baseline-50/100/200/500` | 50 / 100 / 200 / 500 | 5 | 60 |
+| `oversell-100` | 100 | 5 | 60 |
+| `one-user-one-order-100` | 100 | 5 | 60 |
+| `cache-penetration-off/bloom-null-200` | 200 | 5 | 60 |
+| `flash-burst-5k-100/500` | 1000 | 3 | 10 |
+| `flash-sustain-5k-100/500` | 500 | 5 | 60 |
+| `stability-consumer-pause` | 500 | 5 | 30 |
+
+这样设计的依据是：
+
+- `baseline` 和正确性场景要看稳态表现，所以采用 `60 秒 + 5 秒 Ramp-Up`，避免瞬时建连抖动污染结果。
+- `flash-burst` 要模拟活动开场瞬时洪峰，所以采用更高线程数和更短 Ramp-Up，突出短时冲击。
+- `flash-sustain` 要模拟活动开始后持续承压，所以采用中等线程数和更长观察窗口，重点看 Redis 过滤、Kafka backlog 和最终 drain。
+- `cache-penetration` 关注非法请求链路差异，不追求极限压满，`200` 线程已经足以稳定放大 DB 回源与布隆过滤差异。
+
+另外，`timeout-latency` 专项并不是 JMeter 压测，而是直接创建 `100` 笔 `15` 秒超时的未支付订单，随后观测自动关单 `P50/P95/Max`。这是因为该专项关注的是“到期后多久被关单”，而不是 HTTP 接口吞吐。
+
 ## 2.2 当前系统指标监控是怎么实现的
 
 是的，当前这套 benchmark 指标采集，本质上是通过**直接在业务代码中插入轻量探针**来实现的。

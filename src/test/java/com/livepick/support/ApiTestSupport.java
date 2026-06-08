@@ -88,6 +88,7 @@ public abstract class ApiTestSupport {
         order.setStatus(OrderStatusConstants.UNPAID);
         order.setCreateTime(LocalDateTime.now());
         order.setUpdateTime(LocalDateTime.now());
+        order.setReconciliationStatus("PENDING");
         voucherOrderMapper.insert(order);
         return order;
     }

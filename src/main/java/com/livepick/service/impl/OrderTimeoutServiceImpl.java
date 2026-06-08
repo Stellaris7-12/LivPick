@@ -4,12 +4,17 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.livepick.config.LivPickProperties;
 import com.livepick.entity.VoucherOrder;
+import com.livepick.enums.ReconcileLogType;
+import com.livepick.enums.ReconciliationStatus;
 import com.livepick.mapper.VoucherOrderMapper;
 import com.livepick.service.IOrderTimeoutService;
 import com.livepick.service.ISeckillVoucherService;
+import com.livepick.service.RedisReservationRecoveryService;
 import com.livepick.service.SeckillReservationService;
+import com.livepick.service.VoucherReconcileLogService;
 import com.livepick.service.benchmark.BenchmarkMetricsService;
 import com.livepick.service.benchmark.BenchmarkRuntimeConfigService;
+import com.livepick.utils.RedisIdWorker;
 import com.livepick.utils.OrderStatusConstants;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -29,8 +34,11 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
     private final ISeckillVoucherService seckillVoucherService;
     private final LivPickProperties livPickProperties;
     private final SeckillReservationService seckillReservationService;
+    private final RedisReservationRecoveryService redisReservationRecoveryService;
+    private final VoucherReconcileLogService voucherReconcileLogService;
     private final BenchmarkMetricsService benchmarkMetricsService;
     private final BenchmarkRuntimeConfigService runtimeConfigService;
+    private final RedisIdWorker redisIdWorker;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -62,11 +70,31 @@ public class OrderTimeoutServiceImpl implements IOrderTimeoutService {
                 .setSql("stock = stock + 1")
                 .eq("voucher_id", order.getVoucherId())
                 .update();
-        seckillReservationService.rollbackReservationAfterTimeoutCancel(
+        redisReservationRecoveryService.rollbackAfterTimeout(
                 order.getVoucherId(),
                 order.getUserId(),
-                order.getId()
+                order.getId(),
+                null,
+                triggerSource
         );
+        voucherOrderMapper.update(
+                null,
+                new UpdateWrapper<VoucherOrder>()
+                        .eq("id", orderId)
+                        .set("reconciliation_status", ReconciliationStatus.CONSISTENT.name())
+                        .set("update_time", LocalDateTime.now())
+        );
+        voucherReconcileLogService.save(new com.livepick.entity.VoucherReconcileLog()
+                .setId(redisIdWorker.nextId("reconcile"))
+                .setOrderId(order.getId())
+                .setVoucherId(order.getVoucherId())
+                .setUserId(order.getUserId())
+                .setLogType(ReconcileLogType.TIMEOUT.name())
+                .setSource(triggerSource)
+                .setDetail("timeout order closed and reservation restored")
+                .setReconciliationStatus(ReconciliationStatus.CONSISTENT.name())
+                .setCreatedTime(LocalDateTime.now())
+                .setUpdateTime(LocalDateTime.now()));
 
         benchmarkMetricsService.incrementTimeoutClosed();
         benchmarkMetricsService.incrementTimeoutExpired();

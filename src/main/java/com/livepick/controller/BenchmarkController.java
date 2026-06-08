@@ -3,7 +3,7 @@ package com.livepick.controller;
 import com.livepick.config.LivPickProperties;
 import com.livepick.dto.Result;
 import com.livepick.service.IShopService;
-import com.livepick.service.SeckillPendingSendService;
+import com.livepick.service.MqOutboxService;
 import com.livepick.service.benchmark.BenchmarkMetricsService;
 import com.livepick.service.benchmark.BenchmarkRuntimeConfigService;
 import lombok.RequiredArgsConstructor;
@@ -20,10 +20,10 @@ import java.util.Map;
 import java.util.Set;
 
 import static com.livepick.utils.RedisConstants.CACHE_SHOP_KEY;
-import static com.livepick.utils.RedisConstants.SECKILL_PENDING_SEND_INDEX_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_ORDER_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_REORDER_KEY;
 import static com.livepick.utils.RedisConstants.SECKILL_STOCK_KEY;
+import static com.livepick.utils.RedisConstants.SECKILL_TRACE_KEY;
 
 @RestController
 @RequestMapping("/benchmark")
@@ -34,8 +34,8 @@ public class BenchmarkController {
     private final BenchmarkMetricsService benchmarkMetricsService;
     private final BenchmarkRuntimeConfigService benchmarkRuntimeConfigService;
     private final StringRedisTemplate stringRedisTemplate;
-    private final SeckillPendingSendService seckillPendingSendService;
     private final IShopService shopService;
+    private final MqOutboxService mqOutboxService;
 
     @GetMapping("/metrics")
     public Result metrics() {
@@ -59,13 +59,15 @@ public class BenchmarkController {
         if (!benchmarkRuntimeConfigService.isBenchmarkEnabled()) {
             return Result.fail("benchmark disabled");
         }
-        Set<String> pendingIds = stringRedisTemplate.opsForZSet().range(SECKILL_PENDING_SEND_INDEX_KEY, 0, -1);
-        if (pendingIds != null) {
-            for (String pendingId : pendingIds) {
-                seckillPendingSendService.clear(Long.valueOf(pendingId));
-            }
+        long backlog = mqOutboxService.countInFlight();
+        Set<String> traceKeys = stringRedisTemplate.keys(SECKILL_TRACE_KEY + "*");
+        if (traceKeys != null && !traceKeys.isEmpty()) {
+            stringRedisTemplate.delete(traceKeys);
         }
-        return Result.ok();
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("outboxBacklog", backlog);
+        data.put("traceKeysCleared", traceKeys == null ? 0 : traceKeys.size());
+        return Result.ok(data);
     }
 
     @GetMapping("/admin/mq/drain-status")
@@ -73,14 +75,13 @@ public class BenchmarkController {
         if (!benchmarkRuntimeConfigService.isBenchmarkEnabled()) {
             return Result.fail("benchmark disabled");
         }
-        Long pendingCount = stringRedisTemplate.opsForZSet().zCard(SECKILL_PENDING_SEND_INDEX_KEY);
-        long backlog = pendingCount == null ? 0L : pendingCount;
+        long backlog = mqOutboxService.countInFlight();
         benchmarkMetricsService.updateMqBacklog(backlog);
         if (backlog == 0L) {
             benchmarkMetricsService.markMqDrained();
         }
         Map<String, Object> data = new LinkedHashMap<>();
-        data.put("pendingSendBacklog", backlog);
+        data.put("outboxBacklog", backlog);
         data.put("drained", backlog == 0L);
         data.put("consumerPaused", benchmarkRuntimeConfigService.isConsumerPaused());
         return Result.ok(data);
@@ -151,6 +152,7 @@ public class BenchmarkController {
         Long voucherId = Long.valueOf(String.valueOf(request.get("voucherId")));
         stringRedisTemplate.delete(SECKILL_STOCK_KEY + voucherId);
         stringRedisTemplate.delete(SECKILL_ORDER_KEY + voucherId);
+        stringRedisTemplate.delete(SECKILL_TRACE_KEY + voucherId);
         Set<String> reorderKeys = stringRedisTemplate.keys(SECKILL_REORDER_KEY + voucherId + ":*");
         if (reorderKeys != null && !reorderKeys.isEmpty()) {
             stringRedisTemplate.delete(reorderKeys);

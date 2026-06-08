@@ -19,5 +19,7 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     void createVoucherOrder(SeckillOrderMessage message);
 
+    void handleSeckillOrderFailure(SeckillOrderMessage message, String source, String detail);
+
     boolean payOrder(Long orderId);
 }

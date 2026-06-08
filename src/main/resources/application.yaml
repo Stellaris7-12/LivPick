@@ -24,28 +24,40 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
-      retries: 3
+      retries: 5
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 120000
+        linger.ms: 20
+        batch.size: 32768
+        compression.type: lz4
     consumer:
       group-id: ${KAFKA_CONSUMER_GROUP:livpick-consumer-group}
+      enable-auto-commit: false
       auto-offset-reset: latest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: manual_immediate
   jackson:
     default-property-inclusion: non_null
 mybatis-plus:
   type-aliases-package: com.livepick.entity
 livpick:
+  prefix-distinction-name: ${prefix.distinction.name:livpick}
   kafka:
     seckill-order-topic: seckill-order-create
+    seckill-order-dlq-topic: seckill-order-create.DLQ
+    seckill-order-group: livpick-seckill-order
+    seckill-order-dlq-group: livpick-seckill-order-dlq
     cache-delete-retry-topic: cache-shop-delete-retry
     partitions: 1
     replicas: 1
-  seckill:
-    pending-send-scan-interval-ms: 5000
-    pending-send-retry-delay-ms: 5000
-    pending-send-ttl-minutes: 20
-    pending-send-max-attempts: 3
-    pending-send-batch-size: 20
+    outbox-scan-interval-ms: 3000
+    outbox-max-attempts: 5
+    outbox-initial-backoff-ms: 500
+    outbox-max-backoff-ms: 10000
   order:
     timeout-minutes: 15
     timeout-scan-interval-ms: 60000
@@ -65,8 +77,16 @@ livpick:
   benchmark:
     enabled: ${LIVPICK_BENCHMARK_ENABLED:false}
     skip-login-check: ${LIVPICK_BENCHMARK_SKIP_LOGIN_CHECK:false}
+  redis-rollback:
+    max-attempts: 3
+    initial-backoff-ms: 200
+    max-backoff-ms: 1000
+  reconcile:
+    scan-interval-ms: 15000
+    grace-period-ms: 15000
+    trace-fallback-ttl-seconds: 86400
 logging:
   level:
-    com.livepick: debug
+    com.livepick: info
   pattern:
     dateformat: mm:ss.SSS

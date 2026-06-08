@@ -1,6 +1,7 @@
 package com.livepick.mq.consumer;
 
 import cn.hutool.json.JSONUtil;
+import com.livepick.config.KafkaTopicNames;
 import com.livepick.config.LivPickProperties;
 import com.livepick.mq.message.CacheDeleteRetryMessage;
 import com.livepick.service.CacheDeleteRetryScheduleService;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.kafka.support.Acknowledgment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,6 +28,10 @@ class CacheDeleteRetryConsumerTest {
 
     @Mock
     private CacheDeleteRetryScheduleService cacheDeleteRetryScheduleService;
+    @Mock
+    private KafkaTopicNames kafkaTopicNames;
+    @Mock
+    private Acknowledgment acknowledgment;
 
     private LivPickProperties livPickProperties;
 
@@ -35,7 +41,7 @@ class CacheDeleteRetryConsumerTest {
     void setUp() {
         livPickProperties = new LivPickProperties();
         livPickProperties.getCache().setDeleteRetryMaxAttempts(3);
-        cacheDeleteRetryConsumer = new CacheDeleteRetryConsumer(cacheClient, cacheDeleteRetryScheduleService, livPickProperties);
+        cacheDeleteRetryConsumer = new CacheDeleteRetryConsumer(cacheClient, cacheDeleteRetryScheduleService, livPickProperties, kafkaTopicNames);
     }
 
     @Test
@@ -43,13 +49,14 @@ class CacheDeleteRetryConsumerTest {
         CacheDeleteRetryMessage message = buildMessage(0);
         doThrow(new RuntimeException("delete failed")).when(cacheClient).delete(message.getCacheKey());
 
-        cacheDeleteRetryConsumer.consume(JSONUtil.toJsonStr(message));
+        cacheDeleteRetryConsumer.consume(JSONUtil.toJsonStr(message), acknowledgment);
 
         ArgumentCaptor<CacheDeleteRetryMessage> captor = ArgumentCaptor.forClass(CacheDeleteRetryMessage.class);
         verify(cacheDeleteRetryScheduleService).schedule(captor.capture());
         assertEquals(1, captor.getValue().getRetryCount());
         assertEquals(message.getCacheKey(), captor.getValue().getCacheKey());
         assertEquals("delete failed", captor.getValue().getLastError());
+        verify(acknowledgment).acknowledge();
     }
 
     @Test
@@ -57,9 +64,10 @@ class CacheDeleteRetryConsumerTest {
         CacheDeleteRetryMessage message = buildMessage(3);
         doThrow(new RuntimeException("delete failed")).when(cacheClient).delete(message.getCacheKey());
 
-        cacheDeleteRetryConsumer.consume(JSONUtil.toJsonStr(message));
+        cacheDeleteRetryConsumer.consume(JSONUtil.toJsonStr(message), acknowledgment);
 
         verify(cacheDeleteRetryScheduleService, never()).schedule(any());
+        verify(acknowledgment).acknowledge();
     }
 
     private CacheDeleteRetryMessage buildMessage(int retryCount) {

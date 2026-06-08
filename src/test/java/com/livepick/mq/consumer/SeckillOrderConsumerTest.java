@@ -10,11 +10,13 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.kafka.support.Acknowledgment;
 
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
@@ -27,6 +29,8 @@ class SeckillOrderConsumerTest {
     private BenchmarkMetricsService benchmarkMetricsService;
     @Mock
     private BenchmarkRuntimeConfigService benchmarkRuntimeConfigService;
+    @Mock
+    private Acknowledgment acknowledgment;
 
     @InjectMocks
     private SeckillOrderConsumer seckillOrderConsumer;
@@ -35,9 +39,10 @@ class SeckillOrderConsumerTest {
     void shouldDelegateMessageToOrderService() {
         SeckillOrderMessage message = buildMessage();
 
-        seckillOrderConsumer.consume(JSONUtil.toJsonStr(message));
+        seckillOrderConsumer.consume(JSONUtil.toJsonStr(message), acknowledgment);
 
         verify(voucherOrderService).createVoucherOrder(message);
+        verify(acknowledgment).acknowledge();
     }
 
     @Test
@@ -45,8 +50,9 @@ class SeckillOrderConsumerTest {
         SeckillOrderMessage message = buildMessage();
         doThrow(new IllegalStateException("boom")).when(voucherOrderService).createVoucherOrder(message);
 
-        assertThrows(IllegalStateException.class, () -> seckillOrderConsumer.consume(JSONUtil.toJsonStr(message)));
+        assertThrows(IllegalStateException.class, () -> seckillOrderConsumer.consume(JSONUtil.toJsonStr(message), acknowledgment));
         verify(voucherOrderService).createVoucherOrder(message);
+        verifyNoMoreInteractions(acknowledgment);
     }
 
     private SeckillOrderMessage buildMessage() {

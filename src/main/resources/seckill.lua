@@ -1,27 +1,45 @@
--- 1.参数列表
--- 1.1.优惠券id
 local voucherId = ARGV[1]
--- 1.2.用户id
 local userId = ARGV[2]
--- 2.数据key
--- 2.1.库存key
-local stockKey = 'seckill:stock:' .. voucherId
--- 2.2.订单key
-local orderKey = 'seckill:order:' .. voucherId
+local orderId = ARGV[3]
+local traceId = ARGV[4]
+local ts = ARGV[5]
+local traceTtlSeconds = tonumber(ARGV[6])
 
--- 3.脚本业务
--- 3.1.判断库存是否充足 get stockKey
-if(tonumber(redis.call('get', stockKey)) <= 0) then
-    -- 3.2.库存不足，返回1
+local stockKey = 'seckill:stock:' .. voucherId
+local orderKey = 'seckill:order:' .. voucherId
+local traceKey = 'seckill:trace:' .. voucherId
+
+local currentStock = tonumber(redis.call('get', stockKey))
+if (currentStock == nil or currentStock <= 0) then
     return 1
 end
--- 3.2.判断用户是否下单 SISMEMBER orderKey userId
-if(redis.call('sismember', orderKey, userId) == 1) then
-    -- 3.3.存在，说明是重复下单，返回2
+
+if (redis.call('sismember', orderKey, userId) == 1) then
     return 2
 end
--- 3.4.扣库存 incrby stockKey -1
-redis.call('incrby', stockKey, -1)
--- 3.5.下单（保存用户）sadd orderKey userId
+
+local beforeQty = currentStock
+local afterQty = currentStock - 1
+redis.call('set', stockKey, afterQty)
 redis.call('sadd', orderKey, userId)
-return 0
+
+local tracePayload = cjson.encode({
+    traceId = tonumber(traceId),
+    orderId = tonumber(orderId),
+    userId = tonumber(userId),
+    voucherId = tonumber(voucherId),
+    logType = 'DEDUCT',
+    beforeQty = beforeQty,
+    changeQty = -1,
+    afterQty = afterQty,
+    ts = tonumber(ts)
+})
+redis.call('hset', traceKey, traceId, tracePayload)
+if (traceTtlSeconds ~= nil and traceTtlSeconds > 0) then
+    local currentTtl = redis.call('ttl', traceKey)
+    if (currentTtl == nil or currentTtl < 0) then
+        redis.call('expire', traceKey, traceTtlSeconds)
+    end
+end
+
+return 0 - afterQty - 1

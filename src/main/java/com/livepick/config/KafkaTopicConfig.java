@@ -14,7 +14,15 @@ public class KafkaTopicConfig {
 
     @Bean
     public NewTopic seckillOrderTopic() {
-        return TopicBuilder.name(livPickProperties.getKafka().getSeckillOrderTopic())
+        return TopicBuilder.name(buildPrefixedTopic(livPickProperties.getKafka().getSeckillOrderTopic()))
+                .partitions(livPickProperties.getKafka().getPartitions())
+                .replicas(livPickProperties.getKafka().getReplicas())
+                .build();
+    }
+
+    @Bean
+    public NewTopic seckillOrderDlqTopic() {
+        return TopicBuilder.name(buildPrefixedTopic(livPickProperties.getKafka().getSeckillOrderDlqTopic()))
                 .partitions(livPickProperties.getKafka().getPartitions())
                 .replicas(livPickProperties.getKafka().getReplicas())
                 .build();
@@ -22,9 +30,13 @@ public class KafkaTopicConfig {
 
     @Bean
     public NewTopic cacheDeleteRetryTopic() {
-        return TopicBuilder.name(livPickProperties.getKafka().getCacheDeleteRetryTopic())
+        return TopicBuilder.name(buildPrefixedTopic(livPickProperties.getKafka().getCacheDeleteRetryTopic()))
                 .partitions(livPickProperties.getKafka().getPartitions())
                 .replicas(livPickProperties.getKafka().getReplicas())
                 .build();
+    }
+
+    private String buildPrefixedTopic(String topic) {
+        return livPickProperties.getPrefixDistinctionName() + "-" + topic;
     }
 }

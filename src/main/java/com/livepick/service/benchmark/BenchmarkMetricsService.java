@@ -19,15 +19,23 @@ public class BenchmarkMetricsService {
     private final AtomicLong luaDuplicateRejected = new AtomicLong();
     private final AtomicLong kafkaSendSuccess = new AtomicLong();
     private final AtomicLong kafkaSendFailure = new AtomicLong();
+    private final AtomicLong kafkaDlqPublished = new AtomicLong();
     private final AtomicLong pendingRegistered = new AtomicLong();
     private final AtomicLong pendingRetried = new AtomicLong();
     private final AtomicLong pendingRollback = new AtomicLong();
+    private final AtomicLong outboxPending = new AtomicLong();
+    private final AtomicLong outboxRetried = new AtomicLong();
     private final AtomicLong consumerCreated = new AtomicLong();
     private final AtomicLong consumerReactivated = new AtomicLong();
     private final AtomicLong consumerDuplicate = new AtomicLong();
     private final AtomicLong consumerFailure = new AtomicLong();
+    private final AtomicLong consumerRetryExhausted = new AtomicLong();
     private final AtomicLong timeoutClosed = new AtomicLong();
     private final AtomicLong paySuccess = new AtomicLong();
+    private final AtomicLong redisRollbackSuccess = new AtomicLong();
+    private final AtomicLong redisRollbackFailure = new AtomicLong();
+    private final AtomicLong reconcileAbnormal = new AtomicLong();
+    private final AtomicLong reconcileInconsistent = new AtomicLong();
     private final AtomicLong cacheRequests = new AtomicLong();
     private final AtomicLong bloomRejected = new AtomicLong();
     private final AtomicLong bloomPassed = new AtomicLong();
@@ -126,6 +134,10 @@ public class BenchmarkMetricsService {
         kafkaSendFailure.incrementAndGet();
     }
 
+    public void incrementKafkaDlqPublished() {
+        kafkaDlqPublished.incrementAndGet();
+    }
+
     public void incrementPendingRegistered() {
         pendingRegistered.incrementAndGet();
     }
@@ -136,6 +148,14 @@ public class BenchmarkMetricsService {
 
     public void incrementPendingRollback() {
         pendingRollback.incrementAndGet();
+    }
+
+    public void incrementOutboxPending() {
+        outboxPending.incrementAndGet();
+    }
+
+    public void incrementOutboxRetried() {
+        outboxRetried.incrementAndGet();
     }
 
     public void incrementConsumerCreated() {
@@ -154,12 +174,32 @@ public class BenchmarkMetricsService {
         consumerFailure.incrementAndGet();
     }
 
+    public void incrementConsumerRetryExhausted() {
+        consumerRetryExhausted.incrementAndGet();
+    }
+
     public void incrementTimeoutClosed() {
         timeoutClosed.incrementAndGet();
     }
 
     public void incrementPaySuccess() {
         paySuccess.incrementAndGet();
+    }
+
+    public void incrementRedisRollbackSuccess() {
+        redisRollbackSuccess.incrementAndGet();
+    }
+
+    public void incrementRedisRollbackFailure() {
+        redisRollbackFailure.incrementAndGet();
+    }
+
+    public void incrementReconcileAbnormal() {
+        reconcileAbnormal.incrementAndGet();
+    }
+
+    public void incrementReconcileInconsistent() {
+        reconcileInconsistent.incrementAndGet();
     }
 
     public Map<String, Object> snapshot() {
@@ -170,15 +210,23 @@ public class BenchmarkMetricsService {
         seckill.put("luaDuplicateRejected", luaDuplicateRejected.get());
         seckill.put("kafkaSendSuccess", kafkaSendSuccess.get());
         seckill.put("kafkaSendFailure", kafkaSendFailure.get());
+        seckill.put("kafkaDlqPublished", kafkaDlqPublished.get());
         seckill.put("pendingRegistered", pendingRegistered.get());
         seckill.put("pendingRetried", pendingRetried.get());
         seckill.put("pendingRollback", pendingRollback.get());
+        seckill.put("outboxPending", outboxPending.get());
+        seckill.put("outboxRetried", outboxRetried.get());
         seckill.put("consumerCreated", consumerCreated.get());
         seckill.put("consumerReactivated", consumerReactivated.get());
         seckill.put("consumerDuplicate", consumerDuplicate.get());
         seckill.put("consumerFailure", consumerFailure.get());
+        seckill.put("consumerRetryExhausted", consumerRetryExhausted.get());
         seckill.put("timeoutClosed", timeoutClosed.get());
         seckill.put("paySuccess", paySuccess.get());
+        seckill.put("redisRollbackSuccess", redisRollbackSuccess.get());
+        seckill.put("redisRollbackFailure", redisRollbackFailure.get());
+        seckill.put("reconcileAbnormal", reconcileAbnormal.get());
+        seckill.put("reconcileInconsistent", reconcileInconsistent.get());
         root.put("seckill", seckill);
 
         Map<String, Object> cache = new LinkedHashMap<>();
@@ -217,15 +265,23 @@ public class BenchmarkMetricsService {
         luaDuplicateRejected.set(0);
         kafkaSendSuccess.set(0);
         kafkaSendFailure.set(0);
+        kafkaDlqPublished.set(0);
         pendingRegistered.set(0);
         pendingRetried.set(0);
         pendingRollback.set(0);
+        outboxPending.set(0);
+        outboxRetried.set(0);
         consumerCreated.set(0);
         consumerReactivated.set(0);
         consumerDuplicate.set(0);
         consumerFailure.set(0);
+        consumerRetryExhausted.set(0);
         timeoutClosed.set(0);
         paySuccess.set(0);
+        redisRollbackSuccess.set(0);
+        redisRollbackFailure.set(0);
+        reconcileAbnormal.set(0);
+        reconcileInconsistent.set(0);
         cacheRequests.set(0);
         bloomRejected.set(0);
         bloomPassed.set(0);

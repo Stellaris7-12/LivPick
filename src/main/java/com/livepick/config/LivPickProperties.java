@@ -7,28 +7,28 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "livpick")
 public class LivPickProperties {
 
+    private String prefixDistinctionName = "livpick";
     private Kafka kafka = new Kafka();
-    private Seckill seckill = new Seckill();
     private Order order = new Order();
     private Cache cache = new Cache();
     private Bloom bloom = new Bloom();
     private Benchmark benchmark = new Benchmark();
+    private RedisRollback redisRollback = new RedisRollback();
+    private Reconcile reconcile = new Reconcile();
 
     @Data
     public static class Kafka {
         private String seckillOrderTopic = "seckill-order-create";
+        private String seckillOrderDlqTopic = "seckill-order-create.DLQ";
+        private String seckillOrderGroup = "livpick-seckill-order";
+        private String seckillOrderDlqGroup = "livpick-seckill-order-dlq";
         private String cacheDeleteRetryTopic = "cache-shop-delete-retry";
         private int partitions = 1;
         private short replicas = 1;
-    }
-
-    @Data
-    public static class Seckill {
-        private long pendingSendScanIntervalMs = 5_000L;
-        private long pendingSendRetryDelayMs = 5_000L;
-        private long pendingSendTtlMinutes = 20L;
-        private int pendingSendMaxAttempts = 3;
-        private int pendingSendBatchSize = 20;
+        private long outboxScanIntervalMs = 3_000L;
+        private int outboxMaxAttempts = 5;
+        private long outboxInitialBackoffMs = 500L;
+        private long outboxMaxBackoffMs = 10_000L;
     }
 
     @Data
@@ -64,5 +64,19 @@ public class LivPickProperties {
         private String cachePenetrationMode = "BLOOM_NULL";
         private String timeoutMode = "DELAY_QUEUE_FALLBACK";
         private long orderTimeoutSecondsOverride = -1L;
+    }
+
+    @Data
+    public static class RedisRollback {
+        private int maxAttempts = 3;
+        private long initialBackoffMs = 200L;
+        private long maxBackoffMs = 1_000L;
+    }
+
+    @Data
+    public static class Reconcile {
+        private long scanIntervalMs = 15_000L;
+        private long gracePeriodMs = 15_000L;
+        private long traceFallbackTtlSeconds = 86_400L;
     }
 }
